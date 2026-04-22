@@ -30,49 +30,15 @@ async function sendMessageTo(chatId, text) {
       disable_web_page_preview: true,
     });
   } catch (err) {
-    console.error("Send message error:", err.response?.data || err.message);
+    console.error("Send error:", err.response?.data || err.message);
   }
 }
 
-async function getUserPhoto(userId) {
-  try {
-    const res = await axios.get(`${TELEGRAM_API}/getUserProfilePhotos`, {
-      params: { user_id: userId, limit: 1 },
-    });
-
-    const photos = res.data.result.photos;
-    if (!photos || photos.length === 0) return null;
-
-    const fileId = photos[0][0].file_id;
-
-    const fileRes = await axios.get(`${TELEGRAM_API}/getFile`, {
-      params: { file_id: fileId },
-    });
-
-    const filePath = fileRes.data.result.file_path;
-
-    return `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-  } catch (err) {
-    return null;
+function getChannelLink(channel) {
+  if (channel?.username) {
+    return `https://t.me/${channel.username}`;
   }
-}
-
-async function sendPhotoTo(chatId, photoUrl, caption) {
-  if (!photoUrl) {
-    return sendMessageTo(chatId, caption);
-  }
-
-  try {
-    await axios.post(`${TELEGRAM_API}/sendPhoto`, {
-      chat_id: chatId,
-      photo: photoUrl,
-      caption,
-      parse_mode: "HTML",
-    });
-  } catch (err) {
-    console.error("Photo send error:", err.message);
-    await sendMessageTo(chatId, caption);
-  }
+  return null;
 }
 
 // ----------------------
@@ -95,16 +61,16 @@ app.post("/webhook", async (req, res) => {
 
       return sendMessageTo(
         user.id,
-        `👋 <b>Welcome to Channel Tracker</b>
+        `👋 <b>Welcome</b>
 
-📊 I monitor joins & leaves in your Telegram channels.
+📊 I track channel joins & leaves in real-time.
 
 🚀 Setup:
-1. Add me as ADMIN to your channel
-2. I’ll automatically connect
-3. Start receiving live updates
+1. Add me as admin to your channel
+2. I’ll auto-connect
+3. Use /channels to manage
 
-Use /channels to manage your channels.`
+Use /channels to get started.`
       );
     }
 
@@ -116,17 +82,25 @@ Use /channels to manage your channels.`
 
       const { data } = await supabase
         .from("channel_admins")
-        .select("channels(title, id)")
+        .select("channels(title, id, username)")
         .eq("user_id", userId);
 
-      if (!data || data.length === 0) {
+      if (!data?.length) {
         return sendMessageTo(userId, "📭 No connected channels yet.");
       }
 
       let msg = "📺 <b>Your Channels</b>\n\n";
 
       data.forEach((c) => {
-        msg += `• ${c.channels.title} (<code>${c.channels.id}</code>)\n`;
+        const link = c.channels.username
+          ? `https://t.me/${c.channels.username}`
+          : null;
+
+        const title = link
+          ? `<a href="${link}">${c.channels.title}</a>`
+          : c.channels.title;
+
+        msg += `• ${title} (<code>${c.channels.id}</code>)\n`;
       });
 
       return sendMessageTo(userId, msg);
@@ -150,7 +124,7 @@ Use /channels to manage your channels.`
         .eq("user_id", userId)
         .eq("channel_id", channelId);
 
-      return sendMessageTo(userId, "❌ Unsubscribed from channel.");
+      return sendMessageTo(userId, "❌ Unsubscribed.");
     }
 
     // ----------------------
@@ -159,12 +133,13 @@ Use /channels to manage your channels.`
     if (update.my_chat_member) {
       const chat = update.my_chat_member.chat;
       const user = update.my_chat_member.from;
-      const newStatus = update.my_chat_member.new_chat_member.status;
+      const status = update.my_chat_member.new_chat_member.status;
 
-      if (chat.type === "channel" && newStatus === "administrator") {
+      if (chat.type === "channel" && status === "administrator") {
         await supabase.from("channels").upsert({
           id: chat.id,
           title: chat.title,
+          username: chat.username || null,
         });
 
         await supabase.from("users").upsert({
@@ -208,9 +183,12 @@ Use /channels to manage your channels.`
         ? `https://t.me/${user.username}`
         : `tg://user?id=${user.id}`;
 
-      const photoUrl = await getUserPhoto(user.id);
+      const channel = chatMember.chat;
+      const channelLink = getChannelLink(channel);
 
-      const channelId = chatMember.chat.id;
+      const channelDisplay = channelLink
+        ? `<a href="${channelLink}">${channel.title}</a>`
+        : `<b>${channel.title}</b>`;
 
       let eventType = null;
 
@@ -233,13 +211,17 @@ Use /channels to manage your channels.`
       const message = `
 <b>${eventType === "JOIN" ? "🟢 JOIN EVENT" : "🔴 LEAVE EVENT"}</b>
 
+📢 <b>Channel:</b> ${channelDisplay}
+🆔 <code>${channel.id}</code>
+
 👤 <b>User:</b> ${username}
 🔗 <a href="${profileLink}">Open Profile</a>
+
 ⏰ <b>Time:</b> ${new Date().toLocaleString()}
-      `;
+`;
 
       await supabase.from("events").insert({
-        channel_id: channelId,
+        channel_id: channel.id,
         username,
         event_type: eventType,
       });
@@ -247,11 +229,11 @@ Use /channels to manage your channels.`
       const { data: admins } = await supabase
         .from("channel_admins")
         .select("user_id")
-        .eq("channel_id", channelId);
+        .eq("channel_id", channel.id);
 
       if (admins) {
         for (const admin of admins) {
-          await sendPhotoTo(admin.user_id, photoUrl, message);
+          await sendMessageTo(admin.user_id, message);
         }
       }
     }
@@ -264,8 +246,6 @@ Use /channels to manage your channels.`
 });
 
 // ----------------------
-// START SERVER
-// ----------------------
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Bot server running");
+  console.log("🚀 Bot running");
 });
