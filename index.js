@@ -18,16 +18,60 @@ const supabase = createClient(
 );
 
 // ----------------------
-// HELPER: Send message
+// HELPERS
 // ----------------------
+
 async function sendMessageTo(chatId, text) {
   try {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
       text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
     });
   } catch (err) {
     console.error("Send message error:", err.response?.data || err.message);
+  }
+}
+
+async function getUserPhoto(userId) {
+  try {
+    const res = await axios.get(`${TELEGRAM_API}/getUserProfilePhotos`, {
+      params: { user_id: userId, limit: 1 },
+    });
+
+    const photos = res.data.result.photos;
+    if (!photos || photos.length === 0) return null;
+
+    const fileId = photos[0][0].file_id;
+
+    const fileRes = await axios.get(`${TELEGRAM_API}/getFile`, {
+      params: { file_id: fileId },
+    });
+
+    const filePath = fileRes.data.result.file_path;
+
+    return `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function sendPhotoTo(chatId, photoUrl, caption) {
+  if (!photoUrl) {
+    return sendMessageTo(chatId, caption);
+  }
+
+  try {
+    await axios.post(`${TELEGRAM_API}/sendPhoto`, {
+      chat_id: chatId,
+      photo: photoUrl,
+      caption,
+      parse_mode: "HTML",
+    });
+  } catch (err) {
+    console.error("Photo send error:", err.message);
+    await sendMessageTo(chatId, caption);
   }
 }
 
@@ -39,9 +83,9 @@ app.post("/webhook", async (req, res) => {
 
   try {
     // ----------------------
-    // /start command
+    // /start
     // ----------------------
-    if (update.message && update.message.text === "/start") {
+    if (update.message?.text === "/start") {
       const user = update.message.from;
 
       await supabase.from("users").upsert({
@@ -49,59 +93,55 @@ app.post("/webhook", async (req, res) => {
         username: user.username || user.first_name,
       });
 
-      await sendMessageTo(
+      return sendMessageTo(
         user.id,
-        `👋 Welcome!
+        `👋 <b>Welcome to Channel Tracker</b>
 
-1. Add this bot as ADMIN to your channel
-2. I’ll track joins & leaves
-3. Use /channels to manage your channels`
+📊 I monitor joins & leaves in your Telegram channels.
+
+🚀 Setup:
+1. Add me as ADMIN to your channel
+2. I’ll automatically connect
+3. Start receiving live updates
+
+Use /channels to manage your channels.`
       );
     }
 
     // ----------------------
-    // /channels command
+    // /channels
     // ----------------------
-    if (update.message && update.message.text === "/channels") {
+    if (update.message?.text === "/channels") {
       const userId = update.message.from.id;
 
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("channel_admins")
         .select("channels(title, id)")
         .eq("user_id", userId);
 
-      if (error) throw error;
-
       if (!data || data.length === 0) {
-        return sendMessageTo(userId, "📭 You have no connected channels.");
+        return sendMessageTo(userId, "📭 No connected channels yet.");
       }
 
-      let msg = "📺 Your Channels:\n\n";
+      let msg = "📺 <b>Your Channels</b>\n\n";
 
       data.forEach((c) => {
-        msg += `• ${c.channels.title} (ID: ${c.channels.id})\n`;
+        msg += `• ${c.channels.title} (<code>${c.channels.id}</code>)\n`;
       });
 
-      await sendMessageTo(userId, msg);
+      return sendMessageTo(userId, msg);
     }
 
     // ----------------------
-    // /unsubscribe <channel_id>
+    // /unsubscribe
     // ----------------------
-    if (
-      update.message &&
-      update.message.text &&
-      update.message.text.startsWith("/unsubscribe")
-    ) {
+    if (update.message?.text?.startsWith("/unsubscribe")) {
       const parts = update.message.text.split(" ");
       const channelId = parts[1];
       const userId = update.message.from.id;
 
       if (!channelId) {
-        return sendMessageTo(
-          userId,
-          "⚠️ Usage: /unsubscribe <channel_id>"
-        );
+        return sendMessageTo(userId, "⚠️ Usage: /unsubscribe <channel_id>");
       }
 
       await supabase
@@ -110,7 +150,7 @@ app.post("/webhook", async (req, res) => {
         .eq("user_id", userId)
         .eq("channel_id", channelId);
 
-      await sendMessageTo(userId, "❌ Unsubscribed from channel.");
+      return sendMessageTo(userId, "❌ Unsubscribed from channel.");
     }
 
     // ----------------------
@@ -122,19 +162,16 @@ app.post("/webhook", async (req, res) => {
       const newStatus = update.my_chat_member.new_chat_member.status;
 
       if (chat.type === "channel" && newStatus === "administrator") {
-        // Save channel
         await supabase.from("channels").upsert({
           id: chat.id,
           title: chat.title,
         });
 
-        // Save user
         await supabase.from("users").upsert({
           id: user.id,
           username: user.username || user.first_name,
         });
 
-        // Link user to channel (ignore duplicates)
         await supabase.from("channel_admins").upsert(
           {
             user_id: user.id,
@@ -143,15 +180,15 @@ app.post("/webhook", async (req, res) => {
           { onConflict: ["user_id", "channel_id"] }
         );
 
-        await sendMessageTo(
+        return sendMessageTo(
           user.id,
-          `✅ Bot connected to channel: ${chat.title}`
+          `✅ Connected to <b>${chat.title}</b>`
         );
       }
     }
 
     // ----------------------
-    // JOIN / LEAVE TRACKING
+    // JOIN / LEAVE EVENTS
     // ----------------------
     const chatMember = update.chat_member;
 
@@ -159,12 +196,19 @@ app.post("/webhook", async (req, res) => {
       const oldStatus = chatMember.old_chat_member.status;
       const newStatus = chatMember.new_chat_member.status;
 
-      // ignore no-change events
       if (oldStatus === newStatus) return res.sendStatus(200);
 
-      const user = chatMember.new_chat_member.user;
-      const username =
-        user.username || user.first_name || "Unknown";
+      const user = chatMember.from;
+
+      const username = user.username
+        ? `@${user.username}`
+        : user.first_name || "Unknown";
+
+      const profileLink = user.username
+        ? `https://t.me/${user.username}`
+        : `tg://user?id=${user.id}`;
+
+      const photoUrl = await getUserPhoto(user.id);
 
       const channelId = chatMember.chat.id;
 
@@ -186,21 +230,20 @@ app.post("/webhook", async (req, res) => {
 
       if (!eventType) return res.sendStatus(200);
 
-      const message = `${
-        eventType === "JOIN" ? "🟢 JOIN" : "🔴 LEAVE"
-      }
+      const message = `
+<b>${eventType === "JOIN" ? "🟢 JOIN EVENT" : "🔴 LEAVE EVENT"}</b>
 
-👤 User: ${username}
-⏰ Time: ${new Date().toLocaleString()}`;
+👤 <b>User:</b> ${username}
+🔗 <a href="${profileLink}">Open Profile</a>
+⏰ <b>Time:</b> ${new Date().toLocaleString()}
+      `;
 
-      // Store event
       await supabase.from("events").insert({
         channel_id: channelId,
         username,
         event_type: eventType,
       });
 
-      // Get all admins for this channel
       const { data: admins } = await supabase
         .from("channel_admins")
         .select("user_id")
@@ -208,7 +251,7 @@ app.post("/webhook", async (req, res) => {
 
       if (admins) {
         for (const admin of admins) {
-          await sendMessageTo(admin.user_id, message);
+          await sendPhotoTo(admin.user_id, photoUrl, message);
         }
       }
     }
