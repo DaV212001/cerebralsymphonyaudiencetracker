@@ -1,12 +1,11 @@
 require("dotenv").config();
 
 const express = require("express");
-const bodyParser = require("body-parser");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
 // ENV
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -18,7 +17,19 @@ const supabase = createClient(
 );
 
 // ----------------------
-// HELPERS
+// LOG HELPERS
+// ----------------------
+
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
+
+function errorLog(...args) {
+  console.error(new Date().toISOString(), "❌", ...args);
+}
+
+// ----------------------
+// TELEGRAM
 // ----------------------
 
 async function sendMessageTo(chatId, text) {
@@ -30,26 +41,47 @@ async function sendMessageTo(chatId, text) {
       disable_web_page_preview: true,
     });
   } catch (err) {
-    console.error("Send error:", err.response?.data || err.message);
+    errorLog("Send error:", err.response?.data || err.message);
   }
 }
 
-function getChannelLink(channel) {
-  if (channel?.username) {
-    return `https://t.me/${channel.username}`;
-  }
-  return null;
-}
+// ----------------------
+// WEBHOOK (FAST QUEUE)
+// ----------------------
 
-// ----------------------
-// WEBHOOK
-// ----------------------
 app.post("/webhook", async (req, res) => {
   const update = req.body;
 
+  // 🔥 ALWAYS RESPOND FAST
+  res.sendStatus(200);
+
+  try {
+    log("📥 Incoming update:", update.update_id);
+
+    const { error } = await supabase.from("raw_updates").upsert({
+      update_id: update.update_id,
+      payload: update,
+      status: "pending",
+    });
+
+    if (error) {
+      errorLog("Queue insert failed:", error);
+    } else {
+      log("✅ Queued update:", update.update_id);
+    }
+  } catch (err) {
+    errorLog("Webhook error:", err);
+  }
+});
+
+// ----------------------
+// UPDATE HANDLER
+// ----------------------
+
+async function handleUpdate(update, createdAt) {
   try {
     // ----------------------
-    // /start
+    // COMMANDS
     // ----------------------
     if (update.message?.text === "/start") {
       const user = update.message.from;
@@ -65,18 +97,10 @@ app.post("/webhook", async (req, res) => {
 
 📊 I track channel joins & leaves in real-time.
 
-🚀 Setup:
-1. Add me as admin to your channel
-2. I’ll auto-connect
-3. Use /channels to manage
-
 Use /channels to get started.`
       );
     }
 
-    // ----------------------
-    // /channels
-    // ----------------------
     if (update.message?.text === "/channels") {
       const userId = update.message.from.id;
 
@@ -86,7 +110,7 @@ Use /channels to get started.`
         .eq("user_id", userId);
 
       if (!data?.length) {
-        return sendMessageTo(userId, "📭 No connected channels yet.");
+        return sendMessageTo(userId, "📭 No channels yet.");
       }
 
       let msg = "📺 <b>Your Channels</b>\n\n";
@@ -107,28 +131,7 @@ Use /channels to get started.`
     }
 
     // ----------------------
-    // /unsubscribe
-    // ----------------------
-    if (update.message?.text?.startsWith("/unsubscribe")) {
-      const parts = update.message.text.split(" ");
-      const channelId = parts[1];
-      const userId = update.message.from.id;
-
-      if (!channelId) {
-        return sendMessageTo(userId, "⚠️ Usage: /unsubscribe <channel_id>");
-      }
-
-      await supabase
-        .from("channel_admins")
-        .delete()
-        .eq("user_id", userId)
-        .eq("channel_id", channelId);
-
-      return sendMessageTo(userId, "❌ Unsubscribed.");
-    }
-
-    // ----------------------
-    // BOT ADDED TO CHANNEL
+    // BOT ADDED
     // ----------------------
     if (update.my_chat_member) {
       const chat = update.my_chat_member.chat;
@@ -140,11 +143,6 @@ Use /channels to get started.`
           id: chat.id,
           title: chat.title,
           username: chat.username || null,
-        });
-
-        await supabase.from("users").upsert({
-          id: user.id,
-          username: user.username || user.first_name,
         });
 
         await supabase.from("channel_admins").upsert(
@@ -163,89 +161,183 @@ Use /channels to get started.`
     }
 
     // ----------------------
-    // JOIN / LEAVE EVENTS
+    // JOIN / LEAVE
     // ----------------------
-    const chatMember = update.chat_member;
+    const cm = update.chat_member;
+    if (!cm) return;
 
-    if (chatMember) {
-      const oldStatus = chatMember.old_chat_member.status;
-      const newStatus = chatMember.new_chat_member.status;
+    const oldStatus = cm.old_chat_member.status;
+    const newStatus = cm.new_chat_member.status;
 
-      if (oldStatus === newStatus) return res.sendStatus(200);
+    if (oldStatus === newStatus) return;
 
-      const user = chatMember.from;
+    const isJoin =
+      ["left", "kicked", "restricted"].includes(oldStatus) &&
+      ["member", "administrator"].includes(newStatus);
 
-      const username = user.username
-        ? `@${user.username}`
-        : user.first_name || "Unknown";
+    const isLeave =
+      ["member", "administrator", "restricted"].includes(oldStatus) &&
+      ["left", "kicked"].includes(newStatus);
 
-      const profileLink = user.username
-        ? `https://t.me/${user.username}`
-        : `tg://user?id=${user.id}`;
+    if (!isJoin && !isLeave) return;
 
-      const channel = chatMember.chat;
-      const channelLink = getChannelLink(channel);
+    const user = cm.new_chat_member.user;
 
-      const channelDisplay = channelLink
-        ? `<a href="${channelLink}">${channel.title}</a>`
-        : `<b>${channel.title}</b>`;
+    const username = user.username
+      ? `@${user.username}`
+      : user.first_name || "Unknown";
 
-      let eventType = null;
+    const profileLink = user.username
+      ? `https://t.me/${user.username}`
+      : `tg://user?id=${user.id}`;
 
-      if (
-        (oldStatus === "left" || oldStatus === "kicked") &&
-        newStatus === "member"
-      ) {
-        eventType = "JOIN";
-      }
+    const channel = cm.chat;
 
-      if (
-        oldStatus === "member" &&
-        (newStatus === "left" || newStatus === "kicked")
-      ) {
-        eventType = "LEAVE";
-      }
+    // ⏱ Delay detection
+    const delayMs = Date.now() - new Date(createdAt).getTime();
+    const isDelayed = delayMs > 10000;
 
-      if (!eventType) return res.sendStatus(200);
+    const apology = isDelayed
+      ? "\n⚠️ <i>Delayed notification due to system lag.</i>"
+      : "";
 
-      const message = `
-<b>${eventType === "JOIN" ? "🟢 JOIN EVENT" : "🔴 LEAVE EVENT"}</b>
+    const message = `
+<b>${isJoin ? "🟢 JOIN EVENT" : "🔴 LEAVE EVENT"}</b>
 
-📢 <b>Channel:</b> ${channelDisplay}
+📢 <b>${channel.title}</b>
 🆔 <code>${channel.id}</code>
 
-👤 <b>User:</b> ${username}
-🔗 <a href="${profileLink}">Open Profile</a>
+👤 <b>${username}</b>
+🔗 <a href="${profileLink}">Profile</a>
 
-⏰ <b>Time:</b> ${new Date().toLocaleString()}
+⏰ ${new Date().toLocaleString()}
+${apology}
 `;
 
-      await supabase.from("events").insert({
-        channel_id: channel.id,
-        username,
-        event_type: eventType,
-      });
+    // Save event
+    const { error } = await supabase.from("events").insert({
+      channel_id: channel.id,
+      username,
+      event_type: isJoin ? "JOIN" : "LEAVE",
+    });
 
-      const { data: admins } = await supabase
-        .from("channel_admins")
-        .select("user_id")
-        .eq("channel_id", channel.id);
+    if (error) {
+      errorLog("Event insert failed:", error);
+    }
 
-      if (admins) {
-        for (const admin of admins) {
-          await sendMessageTo(admin.user_id, message);
-        }
+    // Notify admins
+    const { data: admins } = await supabase
+      .from("channel_admins")
+      .select("user_id")
+      .eq("channel_id", channel.id);
+
+    if (admins) {
+      for (const admin of admins) {
+        await sendMessageTo(admin.user_id, message);
       }
     }
 
-    res.sendStatus(200);
+    log("📊 Event processed:", isJoin ? "JOIN" : "LEAVE", username);
   } catch (err) {
-    console.error("ERROR:", err);
-    res.sendStatus(200);
+    errorLog("handleUpdate error:", err);
+    throw err;
   }
-});
+}
 
 // ----------------------
+// WORKER (QUEUE PROCESSOR)
+// ----------------------
+
+async function processQueue() {
+  try {
+    const { data: updates } = await supabase
+      .from("raw_updates")
+      .select("*")
+      .or("status.eq.pending,status.eq.failed")
+      .lt("retry_count", 5)
+      .limit(10);
+
+    if (!updates?.length) {
+      return setTimeout(processQueue, 2000);
+    }
+
+    for (const item of updates) {
+      try {
+        log("⚙️ Processing:", item.update_id);
+
+        await supabase
+          .from("raw_updates")
+          .update({ status: "processing" })
+          .eq("id", item.id);
+
+        await handleUpdate(item.payload, item.created_at);
+
+        await supabase
+          .from("raw_updates")
+          .update({
+            status: "done",
+            processed_at: new Date(),
+          })
+          .eq("id", item.id);
+
+        log("✅ Done:", item.update_id);
+      } catch (err) {
+        errorLog("Processing failed:", item.update_id);
+
+        await supabase
+          .from("raw_updates")
+          .update({
+            status: "failed",
+            retry_count: item.retry_count + 1,
+          })
+          .eq("id", item.id);
+      }
+    }
+
+    setTimeout(processQueue, 1000);
+  } catch (err) {
+    errorLog("Worker loop error:", err);
+    setTimeout(processQueue, 3000);
+  }
+}
+
+processQueue();
+
+// ----------------------
+// OPTIONAL POLLING BACKUP
+// ----------------------
+
+let offset = 0;
+
+async function pollBackup() {
+  try {
+    const res = await axios.get(`${TELEGRAM_API}/getUpdates`, {
+      params: { offset, timeout: 10 },
+    });
+
+    for (const update of res.data.result) {
+      offset = update.update_id + 1;
+
+      await supabase.from("raw_updates").upsert({
+        update_id: update.update_id,
+        payload: update,
+        status: "pending",
+      });
+
+      log("🔁 Polled update:", update.update_id);
+    }
+  } catch (err) {
+    errorLog("Polling error:", err.message);
+  }
+
+  setTimeout(pollBackup, 2000);
+}
+
+// Enable if needed
+// pollBackup();
+
+// ----------------------
+
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Bot running");
+  log("🚀 Server running");
 });
