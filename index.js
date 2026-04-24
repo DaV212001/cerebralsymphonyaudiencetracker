@@ -17,7 +17,7 @@ const supabase = createClient(
 );
 
 // ----------------------
-// LOG HELPERS
+// LOGGING
 // ----------------------
 
 function log(...args) {
@@ -52,12 +52,9 @@ async function sendMessageTo(chatId, text) {
 app.post("/webhook", async (req, res) => {
   const update = req.body;
 
-  // 🔥 ALWAYS RESPOND FAST
-  res.sendStatus(200);
+  res.sendStatus(200); // 🔥 respond instantly
 
   try {
-    log("📥 Incoming update:", update.update_id);
-
     const { error } = await supabase.from("raw_updates").upsert({
       update_id: update.update_id,
       payload: update,
@@ -67,7 +64,7 @@ app.post("/webhook", async (req, res) => {
     if (error) {
       errorLog("Queue insert failed:", error);
     } else {
-      log("✅ Queued update:", update.update_id);
+      log("📥 Queued:", update.update_id);
     }
   } catch (err) {
     errorLog("Webhook error:", err);
@@ -78,7 +75,7 @@ app.post("/webhook", async (req, res) => {
 // UPDATE HANDLER
 // ----------------------
 
-async function handleUpdate(update, createdAt) {
+async function handleUpdate(update) {
   try {
     // ----------------------
     // COMMANDS
@@ -95,69 +92,10 @@ async function handleUpdate(update, createdAt) {
         user.id,
         `👋 <b>Welcome</b>
 
-📊 I track channel joins & leaves in real-time.
+📊 I track joins & leaves reliably.
 
 Use /channels to get started.`
       );
-    }
-
-    if (update.message?.text === "/channels") {
-      const userId = update.message.from.id;
-
-      const { data } = await supabase
-        .from("channel_admins")
-        .select("channels(title, id, username)")
-        .eq("user_id", userId);
-
-      if (!data?.length) {
-        return sendMessageTo(userId, "📭 No channels yet.");
-      }
-
-      let msg = "📺 <b>Your Channels</b>\n\n";
-
-      data.forEach((c) => {
-        const link = c.channels.username
-          ? `https://t.me/${c.channels.username}`
-          : null;
-
-        const title = link
-          ? `<a href="${link}">${c.channels.title}</a>`
-          : c.channels.title;
-
-        msg += `• ${title} (<code>${c.channels.id}</code>)\n`;
-      });
-
-      return sendMessageTo(userId, msg);
-    }
-
-    // ----------------------
-    // BOT ADDED
-    // ----------------------
-    if (update.my_chat_member) {
-      const chat = update.my_chat_member.chat;
-      const user = update.my_chat_member.from;
-      const status = update.my_chat_member.new_chat_member.status;
-
-      if (chat.type === "channel" && status === "administrator") {
-        await supabase.from("channels").upsert({
-          id: chat.id,
-          title: chat.title,
-          username: chat.username || null,
-        });
-
-        await supabase.from("channel_admins").upsert(
-          {
-            user_id: user.id,
-            channel_id: chat.id,
-          },
-          { onConflict: ["user_id", "channel_id"] }
-        );
-
-        return sendMessageTo(
-          user.id,
-          `✅ Connected to <b>${chat.title}</b>`
-        );
-      }
     }
 
     // ----------------------
@@ -182,6 +120,14 @@ Use /channels to get started.`
     if (!isJoin && !isLeave) return;
 
     const user = cm.new_chat_member.user;
+    const channel = cm.chat;
+
+    // 🔥 TRUE EVENT TIME (from Telegram)
+    const eventTime = new Date(cm.date * 1000);
+
+    // 🔥 DELAY DETECTION
+    const delayMs = Date.now() - eventTime.getTime();
+    const isDelayed = delayMs > 10000;
 
     const username = user.username
       ? `@${user.username}`
@@ -191,14 +137,32 @@ Use /channels to get started.`
       ? `https://t.me/${user.username}`
       : `tg://user?id=${user.id}`;
 
-    const channel = cm.chat;
+    // ----------------------
+    // SAVE EVENT (DEDUP SAFE)
+    // ----------------------
+    const { error } = await supabase.from("events").insert({
+      channel_id: channel.id,
+      user_id: user.id,
+      username,
+      event_type: isJoin ? "JOIN" : "LEAVE",
+      event_time: eventTime,
+    });
 
-    // ⏱ Delay detection
-    const delayMs = Date.now() - new Date(createdAt).getTime();
-    const isDelayed = delayMs > 10000;
+    if (error) {
+      // duplicate → skip silently
+      if (error.code === "23505") {
+        log("⚠️ Duplicate skipped:", update.update_id);
+        return;
+      }
 
+      throw error;
+    }
+
+    // ----------------------
+    // MESSAGE
+    // ----------------------
     const apology = isDelayed
-      ? "\n⚠️ <i>Delayed notification due to system lag.</i>"
+      ? "\n⚠️ <i>Delayed notification due to downtime.</i>"
       : "";
 
     const message = `
@@ -210,22 +174,10 @@ Use /channels to get started.`
 👤 <b>${username}</b>
 🔗 <a href="${profileLink}">Profile</a>
 
-⏰ ${new Date().toLocaleString()}
+⏰ ${eventTime.toLocaleString()}
 ${apology}
 `;
 
-    // Save event
-    const { error } = await supabase.from("events").insert({
-      channel_id: channel.id,
-      username,
-      event_type: isJoin ? "JOIN" : "LEAVE",
-    });
-
-    if (error) {
-      errorLog("Event insert failed:", error);
-    }
-
-    // Notify admins
     const { data: admins } = await supabase
       .from("channel_admins")
       .select("user_id")
@@ -237,7 +189,7 @@ ${apology}
       }
     }
 
-    log("📊 Event processed:", isJoin ? "JOIN" : "LEAVE", username);
+    log("📊 Event:", isJoin ? "JOIN" : "LEAVE", username);
   } catch (err) {
     errorLog("handleUpdate error:", err);
     throw err;
@@ -245,7 +197,7 @@ ${apology}
 }
 
 // ----------------------
-// WORKER (QUEUE PROCESSOR)
+// WORKER
 // ----------------------
 
 async function processQueue() {
@@ -270,7 +222,7 @@ async function processQueue() {
           .update({ status: "processing" })
           .eq("id", item.id);
 
-        await handleUpdate(item.payload, item.created_at);
+        await handleUpdate(item.payload);
 
         await supabase
           .from("raw_updates")
@@ -282,8 +234,6 @@ async function processQueue() {
 
         log("✅ Done:", item.update_id);
       } catch (err) {
-        errorLog("Processing failed:", item.update_id);
-
         await supabase
           .from("raw_updates")
           .update({
@@ -291,12 +241,14 @@ async function processQueue() {
             retry_count: item.retry_count + 1,
           })
           .eq("id", item.id);
+
+        errorLog("Retrying:", item.update_id);
       }
     }
 
     setTimeout(processQueue, 1000);
   } catch (err) {
-    errorLog("Worker loop error:", err);
+    errorLog("Worker error:", err);
     setTimeout(processQueue, 3000);
   }
 }
@@ -304,10 +256,29 @@ async function processQueue() {
 processQueue();
 
 // ----------------------
-// OPTIONAL POLLING BACKUP
+// POLLING (RECOVERY + OFFSET)
 // ----------------------
 
 let offset = 0;
+
+// load offset on startup
+async function loadOffset() {
+  const { data } = await supabase
+    .from("bot_state")
+    .select("value")
+    .eq("key", "offset")
+    .single();
+
+  offset = data ? parseInt(data.value) : 0;
+  log("🔄 Loaded offset:", offset);
+}
+
+async function saveOffset() {
+  await supabase.from("bot_state").upsert({
+    key: "offset",
+    value: offset.toString(),
+  });
+}
 
 async function pollBackup() {
   try {
@@ -324,8 +295,10 @@ async function pollBackup() {
         status: "pending",
       });
 
-      log("🔁 Polled update:", update.update_id);
+      log("🔁 Polled:", update.update_id);
     }
+
+    await saveOffset();
   } catch (err) {
     errorLog("Polling error:", err.message);
   }
@@ -333,8 +306,16 @@ async function pollBackup() {
   setTimeout(pollBackup, 2000);
 }
 
-// Enable if needed
-// pollBackup();
+// ----------------------
+// STARTUP
+// ----------------------
+
+async function start() {
+  await loadOffset();
+  pollBackup(); // 🔥 ENABLED
+}
+
+start();
 
 // ----------------------
 
