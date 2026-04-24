@@ -332,6 +332,9 @@ Use the channel ID from /channels when unsubscribing.`
     }
   }
 
+  // ----------------------
+  // JOIN / LEAVE EVENTS (NO user guard)
+  // ----------------------
 
   // ----------------------
 // JOIN / LEAVE
@@ -409,6 +412,7 @@ supabase.from("events").insert({
 });
 
 log("event:", isJoin ? "JOIN" : "LEAVE", displayName);
+}
 
 // ----------------------
 
