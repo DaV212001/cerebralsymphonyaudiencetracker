@@ -27,7 +27,7 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const err = (...a) => console.error(new Date().toISOString(), "❌", ...a);
 
 // ----------------------
-// TELEGRAM SEND (RETRY SAFE)
+// SAFE TELEGRAM SEND (RETRY)
 // ----------------------
 
 async function sendMessage(chatId, text, retry = 0) {
@@ -50,16 +50,21 @@ async function sendMessage(chatId, text, retry = 0) {
 }
 
 // ----------------------
-// WEBHOOK ENTRY (FAST ACK)
+// WEBHOOK (FAST ACK)
 // ----------------------
 
 app.post("/webhook", async (req, res) => {
   const update = req.body;
 
-  // IMPORTANT: always ACK immediately
+  // ALWAYS ACK FAST
   res.sendStatus(200);
 
   try {
+    if (!update || typeof update !== "object") {
+      log("⚠️ Invalid update received");
+      return;
+    }
+
     log("📥 Incoming:", update.update_id);
 
     const { error } = await supabase.from("raw_updates").insert({
@@ -75,7 +80,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (error) {
-      err("Queue insert error:", error);
+      err("Queue insert error:", error.message);
     } else {
       log("✅ Queued:", update.update_id);
     }
@@ -85,7 +90,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ----------------------
-// SAFE WORKER LOOP
+// WORKER LOOP (SAFE)
 // ----------------------
 
 let running = false;
@@ -107,7 +112,6 @@ async function processQueue() {
       return setTimeout(processQueue, 1200);
     }
 
-    // mark as processing FIRST (prevents double-processing)
     await supabase
       .from("raw_updates")
       .update({ status: "processing" })
@@ -132,7 +136,7 @@ async function processQueue() {
 
         log("✅ Done:", item.update_id);
       } catch (e) {
-        err("Processing failed:", item.update_id);
+        err("Processing failed:", item.update_id, e.message);
 
         await supabase
           .from("raw_updates")
@@ -190,12 +194,7 @@ Use /channels to view connected channels.`
         .eq("user_id", userId);
 
       if (!data?.length) {
-        return sendMessage(
-          userId,
-          `📭 <b>No channels connected</b>
-
-Add me as admin in your channel first, then send /start.`
-        );
+        return sendMessage(userId, "📭 No channels connected yet.");
       }
 
       let msg = "📺 <b>Your Channels</b>\n\n";
@@ -238,10 +237,7 @@ Add me as admin in your channel first, then send /start.`
           { onConflict: "user_id,channel_id" }
         );
 
-        return sendMessage(
-          user.id,
-          `✅ Connected to <b>${chat.title}</b>`
-        );
+        return sendMessage(user.id, `✅ Connected to <b>${chat.title}</b>`);
       }
     }
 
@@ -267,12 +263,39 @@ Add me as admin in your channel first, then send /start.`
 
     if (!isJoin && !isLeave) return;
 
-    const user = cm.new_chat_member?.user;
-    if (!user) return;
+    // ----------------------
+    // SAFE USER EXTRACTION
+    // ----------------------
+
+    const user =
+      cm.new_chat_member?.user ||
+      cm.old_chat_member?.user ||
+      cm.from;
+
+    if (!user) {
+      log("⚠️ Missing user in update");
+      return;
+    }
 
     const channel = cm.chat;
 
-    const eventTime = new Date(cm.date * 1000);
+    // ----------------------
+    // SAFE TIMESTAMP
+    // ----------------------
+
+    let eventTime;
+
+    if (
+      typeof cm.date === "number" &&
+      cm.date > 1000000000 &&
+      cm.date < 4102444800
+    ) {
+      eventTime = new Date(cm.date * 1000);
+    } else {
+      eventTime = new Date();
+      log("⚠️ Invalid timestamp fallback used:", cm.date);
+    }
+
     const delay = Date.now() - eventTime.getTime();
 
     const delayed =
@@ -287,23 +310,29 @@ Add me as admin in your channel first, then send /start.`
       : `tg://user?id=${user.id}`;
 
     // ----------------------
-    // SAVE EVENT (DEDUP SAFE)
+    // DB WRITE (NON-BLOCKING)
     // ----------------------
 
-    const { error } = await supabase.from("events").insert({
-      channel_id: channel.id,
-      user_id: user.id,
-      username,
-      event_type: isJoin ? "JOIN" : "LEAVE",
-      event_time: eventTime,
-    });
+    let dbOk = true;
 
-    if (error?.code === "23505") {
-      log("🔁 Duplicate event ignored");
-      return;
+    try {
+      const { error } = await supabase.from("events").insert({
+        channel_id: channel.id,
+        user_id: user.id,
+        username,
+        event_type: isJoin ? "JOIN" : "LEAVE",
+        event_time: eventTime,
+      });
+
+      if (error?.code !== "23505") throw error;
+    } catch (e) {
+      dbOk = false;
+      err("DB insert failed (non-fatal):", e.message);
     }
 
-    if (error) throw error;
+    // ----------------------
+    // ADMIN NOTIFICATION (ALWAYS SENT)
+    // ----------------------
 
     const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
@@ -316,13 +345,17 @@ Add me as admin in your channel first, then send /start.`
 ${delayed}
 `;
 
+    const prefix = dbOk
+      ? ""
+      : "⚠️ <i>DB temporarily failed (event may be recovered)</i>\n\n";
+
     const { data: admins } = await supabase
       .from("channel_admins")
       .select("user_id")
       .eq("channel_id", channel.id);
 
     for (const a of admins || []) {
-      await sendMessage(a.user_id, message);
+      await sendMessage(a.user_id, prefix + message);
     }
 
     log("📊 Event:", isJoin ? "JOIN" : "LEAVE", username);
@@ -334,5 +367,5 @@ ${delayed}
 // ----------------------
 
 app.listen(process.env.PORT || 3000, () => {
-  log("🚀 Webhook-only bot running (stable mode)");
+  log("🚀 Webhook-only bot running (fully hardened)");
 });
