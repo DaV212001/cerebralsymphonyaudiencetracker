@@ -27,15 +27,31 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const err = (...a) => console.error(new Date().toISOString(), "❌", ...a);
 
 // ----------------------
-// HEALTH (KEEP RENDER AWAKE)
+// HTML ESCAPER (CRITICAL FIX)
+// ----------------------
+
+function escapeHtml(text = "") {
+  return text
+    .toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// ----------------------
+// HEALTH ENDPOINT (Render wake-up)
 // ----------------------
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    status: "alive",
+    time: new Date().toISOString(),
+  });
 });
 
 // ----------------------
-// TELEGRAM SENDER (RETRY SAFE)
+// SAFE TELEGRAM SENDER
 // ----------------------
 
 async function sendMessage(chatId, text, retry = 0) {
@@ -47,12 +63,24 @@ async function sendMessage(chatId, text, retry = 0) {
       disable_web_page_preview: true,
     });
   } catch (e) {
+    const desc = e.response?.data?.description || "";
+
+    // fallback if HTML breaks
+    if (desc.includes("can't parse entities")) {
+      await axios.post(`${TELEGRAM_API}/sendMessage`, {
+        chat_id: chatId,
+        text: text.replace(/<[^>]*>/g, ""),
+      });
+      return;
+    }
+
     if (retry < 4) {
       return setTimeout(
         () => sendMessage(chatId, text, retry + 1),
         1000 * Math.pow(2, retry)
       );
     }
+
     err("Telegram send failed:", e.response?.data || e.message);
   }
 }
@@ -68,7 +96,7 @@ function safeTime(cm) {
 }
 
 // ----------------------
-// WEBHOOK (FAST QUEUE)
+// WEBHOOK (FAST QUEUE ONLY)
 // ----------------------
 
 app.post("/webhook", async (req, res) => {
@@ -93,7 +121,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ----------------------
-// CLAIM BATCH
+// CLAIM BATCH (SAFE LOCKING)
 // ----------------------
 
 async function claimBatch() {
@@ -118,7 +146,7 @@ async function claimBatch() {
 }
 
 // ----------------------
-// WORKER
+// WORKER LOOP
 // ----------------------
 
 let running = false;
@@ -143,6 +171,7 @@ async function worker() {
           .from("event_queue")
           .update({ status: "done" })
           .eq("id", item.id);
+
       } catch (e) {
         const retry = (item.retry_count || 0) + 1;
 
@@ -193,27 +222,27 @@ async function handleUpdate(update) {
       user.id,
 `👋 <b>Welcome to Cerebral Symphony Tracker</b>
 
-📡 I track channel:
-• Joins
-• Leaves
+📡 Tracks:
+• Channel joins
+• Channel leaves
 • Member changes
 
 ━━━━━━━━━━━━━━
 🔧 Setup:
-1. Add me as ADMIN in your channel
-2. Give "View Members" permission
+1. Add bot as ADMIN in channel
+2. Enable "View Members"
 3. Use /channels
 
 ━━━━━━━━━━━━━━
 📌 Commands:
-/channels - view channels
-/help - help menu
-/unsubscribe <id> - stop tracking`
+/channels
+/help
+/unsubscribe <id>`
     );
   }
 
   // ----------------------
-  // HELP
+  // HELP (FIXED SAFE HTML)
   // ----------------------
   if (msg === "/help") {
     return sendMessage(
@@ -221,87 +250,81 @@ async function handleUpdate(update) {
 `📘 <b>Help</b>
 
 /channels → list channels
-/unsubscribe <id> → stop tracking
+/unsubscribe &lt;id&gt; → stop tracking
 /start → setup bot
 
-⚙️ The bot tracks joins/leaves in real time.`
+⚙️ Real-time tracking of joins/leaves`
     );
   }
 
   // ----------------------
-  // CHANNELS (FIXED LINKING)
+  // CHANNELS
   // ----------------------
   if (msg === "/channels") {
-  const { data } = await supabase
-    .from("channel_admins")
-    .select("channel_id, channels(title, username)")
-    .eq("user_id", user.id);
+    const { data } = await supabase
+      .from("channel_admins")
+      .select("channel_id, channels(title, username)")
+      .eq("user_id", user.id);
 
-  if (!data?.length) {
-    return sendMessage(user.id, "📭 No channels connected.");
+    if (!data?.length) {
+      return sendMessage(user.id, "📭 No channels connected.");
+    }
+
+    let out = "📺 <b>Your Channels</b>\n\n";
+
+    for (const c of data) {
+      const ch = c.channels;
+
+      const link = ch?.username
+        ? `https://t.me/${ch.username}`
+        : null;
+
+      const display = link
+        ? `<a href="${link}">${escapeHtml(ch.title)}</a>`
+        : `<b>${escapeHtml(ch?.title || "Unknown")}</b>`;
+
+      out += `• ${display}\n<code>${c.channel_id}</code>\n\n`;
+    }
+
+    return sendMessage(user.id, out);
   }
-
-  let out = "📺 <b>Your Channels</b>\n\n";
-
-  for (const c of data) {
-    const ch = c.channels;
-
-    const link = ch?.username
-      ? `https://t.me/${ch.username}`
-      : null;
-
-    const display = link
-      ? `<a href="${link}">${ch.title}</a>`
-      : `<b>${ch?.title || "Unknown"}</b>`;
-
-    out += `• ${display}\n<code>${c.channel_id}</code>\n\n`;
-  }
-
-  return sendMessage(user.id, out);
-}
 
   // ----------------------
-  // UNSUBSCRIBE (YOUR REQUEST FIXED)
+  // UNSUBSCRIBE (FIXED + LINKED)
   // ----------------------
   if (msg?.startsWith("/unsubscribe")) {
-  const parts = msg.split(" ");
-  const channelId = parts[1];
+    const channelId = msg.split(" ")[1];
 
-  if (!channelId) {
+    if (!channelId) {
+      return sendMessage(user.id, "❌ Usage: /unsubscribe <channel_id>");
+    }
+
+    const { data: ch } = await supabase
+      .from("channels")
+      .select("title, username")
+      .eq("id", channelId)
+      .single();
+
+    const channelLink = ch?.username
+      ? `<a href="https://t.me/${ch.username}">${escapeHtml(ch.title)}</a>`
+      : `<b>${escapeHtml(ch?.title || "Channel")}</b>`;
+
+    await supabase
+      .from("channel_admins")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("channel_id", channelId);
+
     return sendMessage(
       user.id,
-      "❌ Usage: /unsubscribe <channel_id>"
+`🛑 Unsubscribed from ${channelLink}
+
+You will no longer receive updates.`
     );
   }
 
-  // 🔥 fetch channel first for nice UX
-  const { data: ch } = await supabase
-    .from("channels")
-    .select("title, username")
-    .eq("id", channelId)
-    .single();
-
-  const channelLink = ch?.username
-    ? `<a href="https://t.me/${ch.username}">${ch.title}</a>`
-    : `<b>${ch?.title || "Channel"}</b>`;
-
-  // 🔥 REMOVE subscription (no active column needed)
-  await supabase
-    .from("channel_admins")
-    .delete()
-    .eq("user_id", user.id)
-    .eq("channel_id", channelId);
-
-  return sendMessage(
-    user.id,
-`🛑 Unsubscribed from ${channelLink}
-
-You will no longer receive updates from this channel.`
-  );
-}
-
   // ----------------------
-  // BOT ADDED TO CHANNEL
+  // BOT ADDED
   // ----------------------
   if (update.my_chat_member) {
     const chat = update.my_chat_member.chat;
@@ -321,7 +344,7 @@ You will no longer receive updates from this channel.`
 
       return sendMessage(
         admin.id,
-        `✅ Tracking started for <b>${chat.title}</b>`
+        `✅ Tracking started: <b>${escapeHtml(chat.title)}</b>`
       );
     }
   }
@@ -358,31 +381,29 @@ You will no longer receive updates from this channel.`
     ? `https://t.me/${u.username}`
     : `tg://user?id=${u.id}`;
 
-  // 🔥 FIXED: ALWAYS LINK CHANNEL IF POSSIBLE
   const channelLink = channel.username
-    ? `<a href="https://t.me/${channel.username}">${channel.title}</a>`
-    : `<b>${channel.title}</b>`;
+    ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
+    : `<b>${escapeHtml(channel.title)}</b>`;
 
   const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
-📢 ${channelLink} - ${channel.id}
-👤 ${username}
+📢 ${channelLink}
+👤 ${escapeHtml(username)}
 🔗 <a href="${profile}">Profile</a>
 
 ⏰ ${time.toLocaleString()}
 `;
 
   const { data: admins } = await supabase
-  .from("channel_admins")
-  .select("user_id")
-  .eq("channel_id", channel.id);
+    .from("channel_admins")
+    .select("user_id")
+    .eq("channel_id", channel.id);
 
   for (const a of admins || []) {
     sendMessage(a.user_id, message);
   }
 
-  // DB log (safe, non-blocking)
   supabase.from("events").insert({
     channel_id: channel.id,
     user_id: u.id,
@@ -397,5 +418,5 @@ You will no longer receive updates from this channel.`
 // ----------------------
 
 app.listen(process.env.PORT || 3000, () => {
-  log("🚀 Fully upgraded tracker running");
+  log("🚀 Fully stable tracker running");
 });
