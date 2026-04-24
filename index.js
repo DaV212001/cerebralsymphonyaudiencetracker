@@ -56,7 +56,7 @@ async function sendMessage(chatId, text, retry = 0) {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
-      disable_web_page_preview: true,
+      disable_web_page_preview: false,
     });
   } catch (e) {
     const desc = e.response?.data?.description || "";
@@ -364,7 +364,7 @@ const time = safeTime(cm);
 // USER DISPLAY (CONTACT STYLE)
 // ----------------------
 const displayName = escapeHtml(
-  u.username ? `@${u.username}` : u.first_name || "User"
+  u.username ? `${u.username}` : u.first_name || "User"
 );
 
 // clickable contact
