@@ -1,5 +1,9 @@
 require("dotenv").config();
-
+log("ENV CHECK:", {
+  BOT_TOKEN: !!process.env.BOT_TOKEN,
+  SUPABASE_URL: !!process.env.SUPABASE_URL,
+  SUPABASE_KEY: !!process.env.SUPABASE_KEY,
+});
 const express = require("express");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
@@ -280,32 +284,40 @@ async function saveOffset() {
   });
 }
 
+let isPolling = false;
+
 async function pollBackup() {
-  try {
-    const res = await axios.get(`${TELEGRAM_API}/getUpdates`, {
-      params: { offset, timeout: 10 },
-    });
+  if (isPolling) return; // 🔥 prevent duplicate loops
+  isPolling = true;
 
-    for (const update of res.data.result) {
-      offset = update.update_id + 1;
-
-      await supabase.from("raw_updates").upsert({
-        update_id: update.update_id,
-        payload: update,
-        status: "pending",
+  async function loop() {
+    try {
+      const res = await axios.get(`${TELEGRAM_API}/getUpdates`, {
+        params: { offset, timeout: 10 },
       });
 
-      log("🔁 Polled:", update.update_id);
+      for (const update of res.data.result) {
+        offset = update.update_id + 1;
+
+        await supabase.from("raw_updates").upsert({
+          update_id: update.update_id,
+          payload: update,
+          status: "pending",
+        });
+
+        log("🔁 Polled:", update.update_id);
+      }
+
+      await saveOffset();
+    } catch (err) {
+      errorLog("Polling error:", err.message);
     }
 
-    await saveOffset();
-  } catch (err) {
-    errorLog("Polling error:", err.message);
+    setTimeout(loop, 2000);
   }
 
-  setTimeout(pollBackup, 2000);
+  loop();
 }
-
 // ----------------------
 // STARTUP
 // ----------------------
