@@ -207,25 +207,78 @@ async function handleUpdate(update) {
 
   if (msg && user) {
 
-    if (msg === "/start") {
-      await supabase.from("users").upsert({
-        id: user.id,
-        username: user.username || user.first_name,
-      });
+    // ----------------------
+// START (FULL INSTRUCTIONS)
+// ----------------------
+if (msg === "/start") {
+  await supabase.from("users").upsert({
+    id: user.id,
+    username: user.username || user.first_name,
+  });
 
-      return sendMessage(user.id, `👋 <b>Tracker Ready</b>\n\nUse /help`);
-    }
+  return sendMessage(
+    user.id,
+`👋 <b>Welcome to Cerebral Symphony Tracker</b>
 
-    if (msg === "/help") {
-      return sendMessage(
-        user.id,
-`📘 <b>Help</b>
+📊 <b>What this bot does:</b>
+• Tracks channel joins
+• Tracks channel leaves
+• Sends real-time alerts
+• Stores event history reliably
 
-/channels
-/unsubscribe &lt;channel_id&gt;
-/start`
-      );
-    }
+━━━━━━━━━━━━━━
+⚙️ <b>Setup Instructions:</b>
+
+1️⃣ Add this bot as an <b>ADMIN</b> in your channel  
+2️⃣ Enable <b>"View Members"</b> permission  
+3️⃣ Send /channels to confirm connection  
+
+━━━━━━━━━━━━━━
+📌 <b>Commands:</b>
+
+/channels — view your channels  
+/help — show help menu  
+/unsubscribe &lt;channel_id&gt; — stop tracking  
+
+━━━━━━━━━━━━━━
+⚡ <i>Once added, tracking starts automatically.</i>`
+  );
+}
+
+// ----------------------
+// HELP (FULL GUIDE)
+// ----------------------
+if (msg === "/help") {
+  return sendMessage(
+    user.id,
+`📘 <b>Help Menu</b>
+
+━━━━━━━━━━━━━━
+📊 <b>Features:</b>
+• Real-time join/leave tracking  
+• Automatic event logging  
+• Reliable retry system (no missed events)  
+
+━━━━━━━━━━━━━━
+⚙️ <b>How to Use:</b>
+
+1. Add bot as admin in your channel  
+2. Enable <b>"View Members"</b>  
+3. Use /channels to verify  
+
+━━━━━━━━━━━━━━
+📌 <b>Commands:</b>
+
+/start — setup instructions  
+/channels — list your channels  
+/unsubscribe &lt;channel_id&gt; — stop tracking  
+/help — show this menu  
+
+━━━━━━━━━━━━━━
+🧠 <i>Tip:</i>  
+Use the channel ID from /channels when unsubscribing.`
+  );
+}
 
     if (msg === "/channels") {
       const { data } = await supabase
@@ -279,64 +332,83 @@ async function handleUpdate(update) {
     }
   }
 
+
   // ----------------------
-  // JOIN / LEAVE EVENTS (NO user guard)
-  // ----------------------
+// JOIN / LEAVE
+// ----------------------
+const cm = update.chat_member;
+if (!cm) return;
 
-  const cm = update.chat_member;
-  if (!cm) return;
+const oldS = cm.old_chat_member.status;
+const newS = cm.new_chat_member.status;
 
-  const oldS = cm.old_chat_member.status;
-  const newS = cm.new_chat_member.status;
+const isJoin =
+  ["left", "kicked"].includes(oldS) &&
+  ["member", "administrator"].includes(newS);
 
-  const isJoin =
-    ["left", "kicked"].includes(oldS) &&
-    ["member", "administrator"].includes(newS);
+const isLeave =
+  ["member", "administrator"].includes(oldS) &&
+  ["left", "kicked"].includes(newS);
 
-  const isLeave =
-    ["member", "administrator"].includes(oldS) &&
-    ["left", "kicked"].includes(newS);
+if (!isJoin && !isLeave) return;
 
-  if (!isJoin && !isLeave) return;
+const channel = cm.chat;
+const u = cm.new_chat_member.user;
 
-  const channel = cm.chat;
-  const u = cm.new_chat_member.user;
+const time = safeTime(cm);
 
-  const time = safeTime(cm);
+// ----------------------
+// USER DISPLAY (CONTACT STYLE)
+// ----------------------
+const displayName = escapeHtml(
+  u.username ? `@${u.username}` : u.first_name || "User"
+);
 
-  const username = u.username
-    ? `@${u.username}`
-    : escapeHtml(u.first_name);
+// clickable contact
+const contactLink = u.username
+  ? `<a href="https://t.me/${u.username}">${displayName}</a>`
+  : `<a href="tg://user?id=${u.id}">${displayName}</a>`;
 
-  const profile = u.username
-    ? `https://t.me/${u.username}`
-    : `tg://user?id=${u.id}`;
+// ----------------------
+// CHANNEL LINK
+// ----------------------
+const channelLink = channel.username
+  ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
+  : `<b>${escapeHtml(channel.title)}</b>`;
 
-  const channelLink = channel.username
-    ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
-    : `<b>${escapeHtml(channel.title)}</b>`;
-
-  const message = `
+// ----------------------
+// FINAL MESSAGE (UPDATED FORMAT)
+// ----------------------
+const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
+🆔 <code>${channel.id}</code>
 📢 ${channelLink}
-👤 ${username}
-🔗 <a href="${profile}">Profile</a>
+
+👤 ${contactLink}
 
 ⏰ ${time.toLocaleString()}
 `;
 
-  const { data: admins } = await supabase
-    .from("channel_admins")
-    .select("user_id")
-    .eq("channel_id", channel.id);
+const { data: admins } = await supabase
+  .from("channel_admins")
+  .select("user_id")
+  .eq("channel_id", channel.id);
 
-  for (const a of admins || []) {
-    sendMessage(a.user_id, message);
-  }
-
-  log("event:", isJoin ? "JOIN" : "LEAVE", username);
+for (const a of admins || []) {
+  sendMessage(a.user_id, message);
 }
+
+// DB log
+supabase.from("events").insert({
+  channel_id: channel.id,
+  user_id: u.id,
+  username: u.username || u.first_name,
+  event_type: isJoin ? "JOIN" : "LEAVE",
+  event_time: time.toISOString(),
+});
+
+log("event:", isJoin ? "JOIN" : "LEAVE", displayName);
 
 // ----------------------
 
