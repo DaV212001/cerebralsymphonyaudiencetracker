@@ -386,13 +386,11 @@ const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
 👤 ${contactLink}
-
-🆔 <code>${channel.id}</code>
-
+━━━━━━━━━━━━━━
 📢 ${channelLink}
 
-
-
+🆔 Channel ID: <code>${channel.id}</code>
+━━━━━━━━━━━━━━
 ⏰ ${time.toLocaleString()}
 `;
 
