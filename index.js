@@ -27,22 +27,19 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const err = (...a) => console.error(new Date().toISOString(), "❌", ...a);
 
 // ----------------------
-// SAFE TIME PARSER
+// HEALTH ENDPOINT (WAKE RENDER)
 // ----------------------
 
-function safeEventTime(cm) {
-  const raw = cm?.date;
-
-  if (!raw) return new Date();
-
-  if (raw > 1e12) return new Date(raw);
-  if (raw < 1e12) return new Date(raw * 1000);
-
-  return new Date();
-}
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    status: "alive",
+    time: new Date().toISOString(),
+  });
+});
 
 // ----------------------
-// TELEGRAM SEND (RETRY SAFE)
+// TELEGRAM SENDER
 // ----------------------
 
 async function sendMessage(chatId, text, retry = 0) {
@@ -54,54 +51,55 @@ async function sendMessage(chatId, text, retry = 0) {
       disable_web_page_preview: true,
     });
   } catch (e) {
-    if (retry < 5) {
-      const delay = 1000 * Math.pow(2, retry); // exponential backoff
+    if (retry < 4) {
+      const delay = 1000 * 2 ** retry;
       return setTimeout(
         () => sendMessage(chatId, text, retry + 1),
         delay
       );
     }
-
-    err("Telegram send failed permanently:", e.response?.data || e.message);
+    err("Telegram send failed:", e.response?.data || e.message);
   }
 }
 
 // ----------------------
-// WEBHOOK (ONLY QUEUE)
+// SAFE TIME
+// ----------------------
+
+function safeTime(cm) {
+  const t = cm?.date;
+  if (!t) return new Date();
+  return new Date(t * 1000);
+}
+
+// ----------------------
+// WEBHOOK (FAST)
 // ----------------------
 
 app.post("/webhook", async (req, res) => {
   const update = req.body;
-
-  // ALWAYS ACK FAST
   res.sendStatus(200);
 
-  try {
-    if (!update?.update_id) return;
+  if (!update?.update_id) return;
 
-    const { error } = await supabase.from("event_queue").insert({
+  try {
+    await supabase.from("event_queue").insert({
       update_id: update.update_id,
       payload: update,
       status: "pending",
       retry_count: 0,
       next_retry_at: new Date().toISOString(),
     });
-
-    if (error && error.code !== "23505") {
-      err("Queue insert failed:", error.message);
-    } else {
-      log("📥 Queued:", update.update_id);
-    }
   } catch (e) {
-    err("Webhook crash:", e.message);
+    if (e?.code !== "23505") {
+      err("Queue error:", e.message);
+    }
   }
 });
 
 // ----------------------
-// WORKER LOCKING SYSTEM
+// CLAIM BATCH
 // ----------------------
-
-let running = false;
 
 async function claimBatch() {
   const { data } = await supabase
@@ -113,15 +111,13 @@ async function claimBatch() {
 
   if (!data?.length) return [];
 
-  const ids = data.map((i) => i.id);
-
   await supabase
     .from("event_queue")
     .update({
       status: "processing",
       locked_at: new Date().toISOString(),
     })
-    .in("id", ids);
+    .in("id", data.map((d) => d.id));
 
   return data;
 }
@@ -129,6 +125,8 @@ async function claimBatch() {
 // ----------------------
 // WORKER LOOP
 // ----------------------
+
+let running = false;
 
 async function worker() {
   if (running) return;
@@ -148,32 +146,27 @@ async function worker() {
 
         await supabase
           .from("event_queue")
-          .update({
-            status: "done",
-          })
+          .update({ status: "done" })
           .eq("id", item.id);
-
-        log("✅ Done:", item.update_id);
       } catch (e) {
         const retry = (item.retry_count || 0) + 1;
-
-        const nextRetry =
-          Date.now() + Math.min(60000 * retry, 15 * 60 * 1000);
 
         await supabase
           .from("event_queue")
           .update({
             status: retry >= 5 ? "dead" : "pending",
             retry_count: retry,
-            next_retry_at: new Date(nextRetry).toISOString(),
+            next_retry_at: new Date(
+              Date.now() + Math.min(60000 * retry, 900000)
+            ).toISOString(),
           })
           .eq("id", item.id);
 
-        err("❌ Retry scheduled:", item.update_id, "attempt", retry);
+        err("retry:", item.update_id, retry);
       }
     }
   } catch (e) {
-    err("Worker crash:", e.message);
+    err("worker crash:", e.message);
   }
 
   running = false;
@@ -187,147 +180,199 @@ worker();
 // ----------------------
 
 async function handleUpdate(update) {
-  // ----------------------
-  // COMMANDS
-  // ----------------------
+  try {
+    const msg = update.message?.text;
+    const user = update.message?.from;
 
-  if (update.message?.text === "/start") {
-    const user = update.message.from;
-
-    await supabase.from("users").upsert({
-      id: user.id,
-      username: user.username || user.first_name,
-    });
-
-    return sendMessage(
-      user.id,
-      `👋 <b>Bot Active</b>\n\nTracking events reliably.`
-    );
-  }
-
-  if (update.message?.text === "/channels") {
-    const userId = update.message.from.id;
-
-    const { data } = await supabase
-      .from("channel_admins")
-      .select("channels(title,id,username)")
-      .eq("user_id", userId);
-
-    if (!data?.length) {
-      return sendMessage(userId, "📭 No channels connected.");
-    }
-
-    let msg = "📺 <b>Your Channels</b>\n\n";
-
-    for (const c of data) {
-      const link = c.channels?.username
-        ? `https://t.me/${c.channels.username}`
-        : null;
-
-      msg += `• ${link ? `<a href="${link}">${c.channels.title}</a>` : c.channels.title}\n`;
-    }
-
-    return sendMessage(userId, msg);
-  }
-
-  // ----------------------
-  // BOT ADDED
-  // ----------------------
-
-  if (update.my_chat_member) {
-    const chat = update.my_chat_member.chat;
-    const user = update.my_chat_member.from;
-
-    if (chat.type === "channel") {
-      await supabase.from("channels").upsert({
-        id: chat.id,
-        title: chat.title,
-        username: chat.username || null,
+    // ----------------------
+    // START
+    // ----------------------
+    if (msg === "/start") {
+      await supabase.from("users").upsert({
+        id: user.id,
+        username: user.username || user.first_name,
       });
 
-      await supabase.from("channel_admins").upsert(
-        {
+      return sendMessage(
+        user.id,
+`👋 <b>Welcome to Cerebral Symphony Tracker</b>
+
+This bot tracks:
+📊 Channel joins
+📊 Channel leaves
+📊 Audience changes in real time
+
+━━━━━━━━━━━━━━
+🔧 How to use:
+
+1️⃣ Add this bot as ADMIN in your channel
+2️⃣ Give it permission to "View Members"
+3️⃣ Use /channels to verify connection
+
+━━━━━━━━━━━━━━
+📌 Commands:
+/channels - view your connected channels
+/help - full command list
+
+⚡ The bot works in real-time and logs all changes securely.`
+      );
+    }
+
+    // ----------------------
+    // HELP
+    // ----------------------
+    if (msg === "/help") {
+      return sendMessage(
+        user.id,
+`📘 <b>Help Menu</b>
+
+/start - initialize bot
+/channels - show connected channels
+/help - show this message
+
+━━━━━━━━━━━━━━
+📡 Features:
+• Tracks joins/leaves in channels
+• Sends real-time notifications
+• Stores history safely in database
+• Retries failed events automatically`
+      );
+    }
+
+    // ----------------------
+    // CHANNELS
+    // ----------------------
+    if (msg === "/channels") {
+      const { data } = await supabase
+        .from("channel_admins")
+        .select("channel_id, channels(title,username)")
+        .eq("user_id", user.id);
+
+      if (!data?.length) {
+        return sendMessage(
+          user.id,
+          "📭 No channels connected yet.\n\nAdd me as admin first."
+        );
+      }
+
+      let out = "📺 <b>Your Channels</b>\n\n";
+
+      for (const c of data) {
+        const ch = c.channels;
+
+        const link = ch?.username
+          ? `https://t.me/${ch.username}`
+          : null;
+
+        const display = link
+          ? `<a href="${link}">${ch.title}</a>`
+          : ch?.title || "Unknown";
+
+        out += `• ${display}\n`;
+      }
+
+      return sendMessage(user.id, out);
+    }
+
+    // ----------------------
+    // BOT ADDED TO CHANNEL
+    // ----------------------
+    if (update.my_chat_member) {
+      const chat = update.my_chat_member.chat;
+      const user = update.my_chat_member.from;
+
+      if (chat.type === "channel") {
+        await supabase.from("channels").upsert({
+          id: chat.id,
+          title: chat.title,
+          username: chat.username || null,
+        });
+
+        await supabase.from("channel_admins").upsert({
           user_id: user.id,
           channel_id: chat.id,
-        },
-        { onConflict: "user_id,channel_id" }
-      );
+        });
 
-      return sendMessage(user.id, `✅ Connected: ${chat.title}`);
+        return sendMessage(
+          user.id,
+          `✅ Connected to <b>${chat.title}</b>`
+        );
+      }
     }
-  }
 
-  // ----------------------
-  // JOIN / LEAVE
-  // ----------------------
+    // ----------------------
+    // JOIN / LEAVE
+    // ----------------------
+    const cm = update.chat_member;
+    if (!cm) return;
 
-  const cm = update.chat_member;
-  if (!cm) return;
+    const oldS = cm.old_chat_member.status;
+    const newS = cm.new_chat_member.status;
 
-  const oldStatus = cm.old_chat_member.status;
-  const newStatus = cm.new_chat_member.status;
+    const isJoin =
+      ["left", "kicked"].includes(oldS) &&
+      ["member", "administrator"].includes(newS);
 
-  const isJoin =
-    ["left", "kicked", "restricted"].includes(oldStatus) &&
-    ["member", "administrator"].includes(newStatus);
+    const isLeave =
+      ["member", "administrator"].includes(oldS) &&
+      ["left", "kicked"].includes(newS);
 
-  const isLeave =
-    ["member", "administrator", "restricted"].includes(oldStatus) &&
-    ["left", "kicked"].includes(newStatus);
+    if (!isJoin && !isLeave) return;
 
-  if (!isJoin && !isLeave) return;
+    const channel = cm.chat;
+    const user2 = cm.new_chat_member.user;
 
-  const user = cm.new_chat_member?.user;
-  const channel = cm.chat;
+    const time = safeTime(cm);
 
-  const eventTime = safeEventTime(cm);
+    const username = user2.username
+      ? `@${user2.username}`
+      : user2.first_name;
 
-  const username = user.username
-    ? `@${user.username}`
-    : user.first_name || "Unknown";
+    const profile = user2.username
+      ? `https://t.me/${user2.username}`
+      : `tg://user?id=${user2.id}`;
 
-  const profile = user.username
-    ? `https://t.me/${user.username}`
-    : `tg://user?id=${user.id}`;
+    // IMPORTANT FIX: proper channel link
+    const channelLink = channel.username
+      ? `<a href="https://t.me/${channel.username}">${channel.title}</a>`
+      : `<b>${channel.title}</b>`;
 
-  const message = `
+    const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
-📢 ${channel.title}
+📢 ${channelLink}
 👤 ${username}
 🔗 <a href="${profile}">Profile</a>
 
-⏰ ${eventTime.toLocaleString()}
+⏰ ${time.toLocaleString()}
 `;
 
-  // SEND FIRST (critical path)
-  const { data: admins } = await supabase
-    .from("channel_admins")
-    .select("user_id")
-    .eq("channel_id", channel.id);
+    const { data: admins } = await supabase
+      .from("channel_admins")
+      .select("user_id")
+      .eq("channel_id", channel.id);
 
-  for (const a of admins || []) {
-    sendMessage(a.user_id, message);
-  }
+    for (const a of admins || []) {
+      sendMessage(a.user_id, message);
+    }
 
-  // DB LOG SECOND (non-blocking)
-  try {
-    await supabase.from("events").insert({
+    // DB log (non-blocking)
+    supabase.from("events").insert({
       channel_id: channel.id,
-      user_id: user.id,
+      user_id: user2.id,
       username,
       event_type: isJoin ? "JOIN" : "LEAVE",
-      event_time: eventTime.toISOString(),
+      event_time: time.toISOString(),
     });
-  } catch (e) {
-    err("DB log failed (ignored):", e.message);
-  }
 
-  log("📊 Event:", isJoin ? "JOIN" : "LEAVE", username);
+    log("event:", isJoin ? "JOIN" : "LEAVE", username);
+  } catch (e) {
+    err("handler:", e.message);
+  }
 }
 
 // ----------------------
 
 app.listen(process.env.PORT || 3000, () => {
-  log("🚀 Reliable webhook + queue system running");
+  log("🚀 Bot running with help + health + stable links");
 });
