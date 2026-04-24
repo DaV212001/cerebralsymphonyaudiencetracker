@@ -27,10 +27,10 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const err = (...a) => console.error(new Date().toISOString(), "❌", ...a);
 
 // ----------------------
-// TELEGRAM SEND
+// TELEGRAM SEND (RETRY SAFE)
 // ----------------------
 
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, retry = 0) {
   try {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
@@ -39,28 +39,40 @@ async function sendMessage(chatId, text) {
       disable_web_page_preview: true,
     });
   } catch (e) {
-    err("Send failed:", e.response?.data || e.message);
+    if (retry < 3) {
+      return setTimeout(
+        () => sendMessage(chatId, text, retry + 1),
+        1000 * (retry + 1)
+      );
+    }
+    err("Send failed permanently:", e.response?.data || e.message);
   }
 }
 
 // ----------------------
-// WEBHOOK (ULTRA FAST ENTRY POINT)
+// WEBHOOK ENTRY (FAST ACK)
 // ----------------------
 
 app.post("/webhook", async (req, res) => {
   const update = req.body;
 
-  // 🔥 ALWAYS ACK FAST (critical for Telegram reliability)
+  // IMPORTANT: always ACK immediately
   res.sendStatus(200);
 
   try {
     log("📥 Incoming:", update.update_id);
 
-    const { error } = await supabase.from("raw_updates").upsert({
+    const { error } = await supabase.from("raw_updates").insert({
       update_id: update.update_id,
       payload: update,
       status: "pending",
+      retry_count: 0,
     });
+
+    if (error?.code === "23505") {
+      log("🔁 Duplicate update ignored:", update.update_id);
+      return;
+    }
 
     if (error) {
       err("Queue insert error:", error);
@@ -68,35 +80,45 @@ app.post("/webhook", async (req, res) => {
       log("✅ Queued:", update.update_id);
     }
   } catch (e) {
-    err("Webhook crash:", e);
+    err("Webhook crash:", e.message);
   }
 });
 
 // ----------------------
-// CORE PROCESSOR (WORKER LOOP)
+// SAFE WORKER LOOP
 // ----------------------
 
+let running = false;
+
 async function processQueue() {
+  if (running) return;
+  running = true;
+
   try {
     const { data: items } = await supabase
       .from("raw_updates")
       .select("*")
-      .or("status.eq.pending,status.eq.failed")
+      .eq("status", "pending")
       .lt("retry_count", 5)
       .limit(10);
 
     if (!items?.length) {
-      return setTimeout(processQueue, 1500);
+      running = false;
+      return setTimeout(processQueue, 1200);
     }
+
+    // mark as processing FIRST (prevents double-processing)
+    await supabase
+      .from("raw_updates")
+      .update({ status: "processing" })
+      .in(
+        "id",
+        items.map((i) => i.id)
+      );
 
     for (const item of items) {
       try {
         log("⚙️ Processing:", item.update_id);
-
-        await supabase
-          .from("raw_updates")
-          .update({ status: "processing" })
-          .eq("id", item.id);
 
         await handleUpdate(item.payload);
 
@@ -121,18 +143,18 @@ async function processQueue() {
           .eq("id", item.id);
       }
     }
-
-    setTimeout(processQueue, 800);
   } catch (e) {
-    err("Queue loop error:", e);
-    setTimeout(processQueue, 3000);
+    err("Queue loop error:", e.message);
   }
+
+  running = false;
+  setTimeout(processQueue, 800);
 }
 
 processQueue();
 
 // ----------------------
-// MAIN LOGIC
+// MAIN HANDLER
 // ----------------------
 
 async function handleUpdate(update) {
@@ -140,6 +162,7 @@ async function handleUpdate(update) {
     // ----------------------
     // COMMANDS
     // ----------------------
+
     if (update.message?.text === "/start") {
       const user = update.message.from;
 
@@ -152,9 +175,9 @@ async function handleUpdate(update) {
         user.id,
         `👋 <b>Bot Active</b>
 
-📊 Tracking channel joins/leaves reliably.
+📊 Tracking channel joins/leaves.
 
-Use /channels to view channels.`
+Use /channels to view connected channels.`
       );
     }
 
@@ -167,13 +190,18 @@ Use /channels to view channels.`
         .eq("user_id", userId);
 
       if (!data?.length) {
-        return sendMessage(userId, "📭 No channels connected.");
+        return sendMessage(
+          userId,
+          `📭 <b>No channels connected</b>
+
+Add me as admin in your channel first, then send /start.`
+        );
       }
 
       let msg = "📺 <b>Your Channels</b>\n\n";
 
       for (const c of data) {
-        const link = c.channels.username
+        const link = c.channels?.username
           ? `https://t.me/${c.channels.username}`
           : null;
 
@@ -190,6 +218,7 @@ Use /channels to view channels.`
     // ----------------------
     // BOT ADDED TO CHANNEL
     // ----------------------
+
     if (update.my_chat_member) {
       const chat = update.my_chat_member.chat;
       const user = update.my_chat_member.from;
@@ -206,16 +235,20 @@ Use /channels to view channels.`
             user_id: user.id,
             channel_id: chat.id,
           },
-          { onConflict: ["user_id", "channel_id"] }
+          { onConflict: "user_id,channel_id" }
         );
 
-        return sendMessage(user.id, `✅ Connected to <b>${chat.title}</b>`);
+        return sendMessage(
+          user.id,
+          `✅ Connected to <b>${chat.title}</b>`
+        );
       }
     }
 
     // ----------------------
     // JOIN / LEAVE EVENTS
     // ----------------------
+
     const cm = update.chat_member;
     if (!cm) return;
 
@@ -234,13 +267,16 @@ Use /channels to view channels.`
 
     if (!isJoin && !isLeave) return;
 
-    const user = cm.new_chat_member.user;
+    const user = cm.new_chat_member?.user;
+    if (!user) return;
+
     const channel = cm.chat;
 
     const eventTime = new Date(cm.date * 1000);
     const delay = Date.now() - eventTime.getTime();
 
-    const delayed = delay > 10000 ? "\n⚠️ <i>Delayed event</i>" : "";
+    const delayed =
+      delay > 10000 ? "\n⚠️ <i>Delayed event detected</i>" : "";
 
     const username = user.username
       ? `@${user.username}`
@@ -253,6 +289,7 @@ Use /channels to view channels.`
     // ----------------------
     // SAVE EVENT (DEDUP SAFE)
     // ----------------------
+
     const { error } = await supabase.from("events").insert({
       channel_id: channel.id,
       user_id: user.id,
@@ -261,9 +298,12 @@ Use /channels to view channels.`
       event_time: eventTime,
     });
 
-    if (error && error.code !== "23505") {
-      throw error;
+    if (error?.code === "23505") {
+      log("🔁 Duplicate event ignored");
+      return;
     }
+
+    if (error) throw error;
 
     const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
@@ -287,12 +327,12 @@ ${delayed}
 
     log("📊 Event:", isJoin ? "JOIN" : "LEAVE", username);
   } catch (e) {
-    err("Handler error:", e);
+    err("Handler error:", e.message || e);
   }
 }
 
 // ----------------------
 
 app.listen(process.env.PORT || 3000, () => {
-  log("🚀 Webhook-only bot running");
+  log("🚀 Webhook-only bot running (stable mode)");
 });
