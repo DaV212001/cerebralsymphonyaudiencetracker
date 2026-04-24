@@ -385,10 +385,13 @@ const channelLink = channel.username
 const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
+👤 ${contactLink}
+
 🆔 <code>${channel.id}</code>
+
 📢 ${channelLink}
 
-👤 ${contactLink}
+
 
 ⏰ ${time.toLocaleString()}
 `;
