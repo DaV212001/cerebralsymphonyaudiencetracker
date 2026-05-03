@@ -404,13 +404,21 @@ for (const a of admins || []) {
 }
 
 // DB log
-supabase.from("events").insert({
+const { error: eventInsertError } = await supabase.from("events").insert({
   channel_id: channel.id,
   user_id: u.id,
   username: u.username || u.first_name,
   event_type: isJoin ? "JOIN" : "LEAVE",
   event_time: time.toISOString(),
 });
+
+if (eventInsertError) {
+  err("event log insert failed:", eventInsertError.message, {
+    channel_id: channel.id,
+    user_id: u.id,
+    event_type: isJoin ? "JOIN" : "LEAVE",
+  });
+}
 
 log("event:", isJoin ? "JOIN" : "LEAVE", displayName);
 }
