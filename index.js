@@ -97,6 +97,7 @@ const DEFAULT_ADMIN_SETTINGS = {
   notify_joins: true,
   notify_leaves: true,
   hide_usernames: false,
+  batch_window_seconds: 0,
 };
 
 function adminSettings(row = {}) {
@@ -104,6 +105,8 @@ function adminSettings(row = {}) {
     notify_joins: row.notify_joins ?? DEFAULT_ADMIN_SETTINGS.notify_joins,
     notify_leaves: row.notify_leaves ?? DEFAULT_ADMIN_SETTINGS.notify_leaves,
     hide_usernames: row.hide_usernames ?? DEFAULT_ADMIN_SETTINGS.hide_usernames,
+    batch_window_seconds:
+      row.batch_window_seconds ?? DEFAULT_ADMIN_SETTINGS.batch_window_seconds,
   };
 }
 
@@ -118,6 +121,30 @@ function channelDisplay(channel) {
   return channel?.username
     ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
     : `<b>${escapeHtml(channel?.title || "Channel")}</b>`;
+}
+
+function batchMode(settings) {
+  const seconds = Number(settings.batch_window_seconds || 0);
+  if (!seconds) return "instant";
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  return `${seconds} seconds`;
+}
+
+function parseBatchWindow(value) {
+  if (!value || value === "off" || value === "instant") return 0;
+
+  const match = value.match(/^(\d+)(s|m)?$/i);
+  if (!match) return null;
+
+  const amount = Number(match[1]);
+  const unit = (match[2] || "s").toLowerCase();
+  const seconds = unit === "m" ? amount * 60 : amount;
+
+  if (seconds < 10 || seconds > 3600) return null;
+  return seconds;
 }
 
 // ----------------------
@@ -171,6 +198,130 @@ async function claimBatch() {
 }
 
 // ----------------------
+// NOTIFICATION BATCHES
+// ----------------------
+
+function eventWord(eventType, count) {
+  const word = eventType === "JOIN" ? "join" : "leave";
+  return count === 1 ? word : `${word}s`;
+}
+
+function batchMessage(row) {
+  const channel = {
+    title: row.channel_title,
+    username: row.channel_username,
+  };
+
+  return `
+<b>${row.event_type === "JOIN" ? "JOIN" : "LEAVE"} SUMMARY</b>
+
+${row.count} ${eventWord(row.event_type, row.count)} during recent activity
+━━━━━━━━━━━━━━
+📢 ${channelDisplay(channel)}
+
+🆔 Channel ID: <code>${row.channel_id}</code>
+━━━━━━━━━━━━━━
+First: ${new Date(row.first_event_at).toLocaleString()}
+Latest: ${new Date(row.last_event_at).toLocaleString()}
+`;
+}
+
+async function queueBatchNotification({ admin, settings, channel, eventType, time }) {
+  const now = new Date();
+  const flushAt = new Date(
+    now.getTime() + settings.batch_window_seconds * 1000
+  ).toISOString();
+
+  const { data: existing, error: selectError } = await supabase
+    .from("notification_batches")
+    .select("id, count, first_event_at")
+    .eq("status", "pending")
+    .eq("user_id", admin.user_id)
+    .eq("channel_id", channel.id)
+    .eq("event_type", eventType)
+    .maybeSingle();
+
+  if (selectError) {
+    throw selectError;
+  }
+
+  if (existing) {
+    const { error: updateError } = await supabase
+      .from("notification_batches")
+      .update({
+        count: (existing.count || 0) + 1,
+        last_event_at: time.toISOString(),
+        flush_at: flushAt,
+        channel_title: channel.title,
+        channel_username: channel.username || null,
+      })
+      .eq("id", existing.id);
+
+    if (updateError) throw updateError;
+    return;
+  }
+
+  const { error: insertError } = await supabase
+    .from("notification_batches")
+    .insert({
+      user_id: admin.user_id,
+      channel_id: channel.id,
+      event_type: eventType,
+      count: 1,
+      first_event_at: time.toISOString(),
+      last_event_at: time.toISOString(),
+      flush_at: flushAt,
+      status: "pending",
+      channel_title: channel.title,
+      channel_username: channel.username || null,
+    });
+
+  if (insertError) throw insertError;
+}
+
+async function flushDueBatches() {
+  const { data: batches, error: selectError } = await supabase
+    .from("notification_batches")
+    .select("*")
+    .eq("status", "pending")
+    .lte("flush_at", new Date().toISOString())
+    .limit(20);
+
+  if (selectError) {
+    err("batch select failed:", selectError.message);
+    return;
+  }
+
+  if (!batches?.length) return;
+
+  await supabase
+    .from("notification_batches")
+    .update({ status: "processing" })
+    .in("id", batches.map((b) => b.id));
+
+  for (const batch of batches) {
+    try {
+      await sendMessage(batch.user_id, batchMessage(batch));
+
+      await supabase
+        .from("notification_batches")
+        .update({ status: "done", sent_at: new Date().toISOString() })
+        .eq("id", batch.id);
+    } catch (e) {
+      err("batch send failed:", e.message);
+
+      await supabase
+        .from("notification_batches")
+        .update({
+          status: "pending",
+          flush_at: new Date(Date.now() + 60000).toISOString(),
+        })
+        .eq("id", batch.id);
+    }
+  }
+}
+
+// ----------------------
 // WORKER
 // ----------------------
 
@@ -181,6 +332,8 @@ async function worker() {
   running = true;
 
   try {
+    await flushDueBatches();
+
     const items = await claimBatch();
 
     if (!items.length) {
@@ -271,6 +424,7 @@ if (msg === "/start") {
 /settings &lt;channel_id&gt; — view channel notification settings  
 /notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
+/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
 /help — show help menu  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 
@@ -294,6 +448,7 @@ if (msg === "/help") {
 • Reliable retry system (no missed events)  
 • Choose all alerts, joins only, or leaves only  
 • Hide joiner/leaver usernames in notifications  
+• Batch rapid activity into summary notifications  
 
 ━━━━━━━━━━━━━━
 ⚙️ <b>How to Use:</b>
@@ -310,6 +465,7 @@ if (msg === "/help") {
 /settings &lt;channel_id&gt; — view notification settings  
 /notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
+/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 /help — show this menu  
 
@@ -322,7 +478,7 @@ Use the channel ID from /channels when unsubscribing.`
     if (msg === "/channels") {
       const { data } = await supabase
         .from("channel_admins")
-        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)")
         .eq("user_id", user.id);
 
       if (!data?.length) {
@@ -341,7 +497,7 @@ Use the channel ID from /channels when unsubscribing.`
         const settings = adminSettings(c);
         const usernameMode = settings.hide_usernames ? "hidden" : "visible";
 
-        out += `• ${display}\n<code>${c.channel_id}</code>\nAlerts: ${notificationMode(settings)}\nUsernames: ${usernameMode}\n\n`;
+        out += `• ${display}\n<code>${c.channel_id}</code>\nAlerts: ${notificationMode(settings)}\nUsernames: ${usernameMode}\nBatching: ${batchMode(settings)}\n\n`;
       }
 
       return sendMessage(user.id, out);
@@ -356,7 +512,7 @@ Use the channel ID from /channels when unsubscribing.`
 
       const { data: row, error: settingsError } = await supabase
         .from("channel_admins")
-        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)")
         .eq("user_id", user.id)
         .eq("channel_id", channelId)
         .single();
@@ -375,13 +531,16 @@ Use the channel ID from /channels when unsubscribing.`
 
 Alerts: <b>${notificationMode(settings)}</b>
 Usernames: <b>${settings.hide_usernames ? "hidden" : "visible"}</b>
+Batching: <b>${batchMode(settings)}</b>
 
 Commands:
 /notify ${row.channel_id} all
 /notify ${row.channel_id} joins
 /notify ${row.channel_id} leaves
 /hideuser ${row.channel_id} on
-/hideuser ${row.channel_id} off`
+/hideuser ${row.channel_id} off
+/batch ${row.channel_id} off
+/batch ${row.channel_id} 1m`
       );
     }
 
@@ -403,7 +562,7 @@ Commands:
         .update(nextSettings)
         .eq("user_id", user.id)
         .eq("channel_id", channelId)
-        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)")
         .single();
 
       if (updateError || !data) {
@@ -430,7 +589,7 @@ Commands:
         .update({ hide_usernames: mode === "on" })
         .eq("user_id", user.id)
         .eq("channel_id", channelId)
-        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)")
         .single();
 
       if (updateError || !data) {
@@ -441,6 +600,33 @@ Commands:
       return sendMessage(
         user.id,
         `✅ Usernames for ${channelDisplay(data.channels)} are now <b>${settings.hide_usernames ? "hidden" : "visible"}</b>.`
+      );
+    }
+
+    if (msg.startsWith("/batch")) {
+      const [, channelId, windowValue] = msg.split(/\s+/);
+      const seconds = parseBatchWindow(windowValue);
+
+      if (!channelId || seconds === null) {
+        return sendMessage(user.id, "❌ Usage: /batch &lt;channel_id&gt; off|30s|1m|5m");
+      }
+
+      const { data, error: updateError } = await supabase
+        .from("channel_admins")
+        .update({ batch_window_seconds: seconds })
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)")
+        .single();
+
+      if (updateError || !data) {
+        return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
+      }
+
+      const settings = adminSettings(data);
+      return sendMessage(
+        user.id,
+        `✅ Batching for ${channelDisplay(data.channels)} set to <b>${batchMode(settings)}</b>.`
       );
     }
 
@@ -520,7 +706,7 @@ const channelLink = channel.username
 
 const { data: admins } = await supabase
   .from("channel_admins")
-  .select("user_id, notify_joins, notify_leaves, hide_usernames")
+  .select("user_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds")
   .eq("channel_id", channel.id);
 
 for (const a of admins || []) {
@@ -528,6 +714,17 @@ for (const a of admins || []) {
 
   if (isJoin && !settings.notify_joins) continue;
   if (isLeave && !settings.notify_leaves) continue;
+
+  if (settings.batch_window_seconds > 0) {
+    await queueBatchNotification({
+      admin: a,
+      settings,
+      channel,
+      eventType: isJoin ? "JOIN" : "LEAVE",
+      time,
+    });
+    continue;
+  }
 
   const userLine = settings.hide_usernames
     ? (isJoin ? "A user joined" : "A user left")
