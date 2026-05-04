@@ -504,7 +504,7 @@ Use the channel ID from /channels when unsubscribing.`
 
       let sent = 0;
       let failed = 0;
-      const broadcastText = `📣 <b>Update from Cerebral Symphony Tracker</b>\n\n${escapeHtml(text)}`;
+      const broadcastText = `📣 <b>Update from ChannelSubTracker</b>\n\n${escapeHtml(text)}`;
 
       for (const target of users || []) {
         try {
