@@ -13,6 +13,7 @@ app.use(express.json({ limit: "1mb" }));
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const ADMIN_USER_ID = Number(process.env.ADMIN_USER_ID || 0);
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -58,6 +59,7 @@ async function sendMessage(chatId, text, retry = 0) {
       parse_mode: "HTML",
       disable_web_page_preview: false,
     });
+    return true;
   } catch (e) {
     const desc = e.response?.data?.description || "";
 
@@ -66,17 +68,16 @@ async function sendMessage(chatId, text, retry = 0) {
         chat_id: chatId,
         text: text.replace(/<[^>]*>/g, ""),
       });
-      return;
+      return true;
     }
 
     if (retry < 4) {
-      return setTimeout(
-        () => sendMessage(chatId, text, retry + 1),
-        1000 * 2 ** retry
-      );
+      await wait(1000 * 2 ** retry);
+      return sendMessage(chatId, text, retry + 1);
     }
 
     err("Telegram send failed:", e.response?.data || e.message);
+    return false;
   }
 }
 
@@ -87,6 +88,10 @@ async function sendMessage(chatId, text, retry = 0) {
 function safeTime(cm) {
   const t = cm?.date;
   return t ? new Date(t * 1000) : new Date();
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ----------------------
@@ -425,6 +430,7 @@ if (msg === "/start") {
 /notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
+/broadcast &lt;message&gt; — admin-only update message  
 /help — show help menu  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 
@@ -466,6 +472,7 @@ if (msg === "/help") {
 /notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
+/broadcast &lt;message&gt; — admin-only update message  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 /help — show this menu  
 
@@ -474,6 +481,51 @@ if (msg === "/help") {
 Use the channel ID from /channels when unsubscribing.`
   );
 }
+
+    if (msg.startsWith("/broadcast")) {
+      if (!ADMIN_USER_ID || user.id !== ADMIN_USER_ID) {
+        return sendMessage(user.id, "❌ You are not allowed to use this command.");
+      }
+
+      const text = msg.replace(/^\/broadcast(@\w+)?\s*/i, "").trim();
+
+      if (!text) {
+        return sendMessage(user.id, "❌ Usage: /broadcast &lt;message&gt;");
+      }
+
+      const { data: users, error: usersError } = await supabase
+        .from("users")
+        .select("id");
+
+      if (usersError) {
+        err("broadcast users lookup failed:", usersError.message);
+        return sendMessage(user.id, "❌ Could not load users for broadcast.");
+      }
+
+      let sent = 0;
+      let failed = 0;
+      const broadcastText = `📣 <b>Update from Cerebral Symphony Tracker</b>\n\n${escapeHtml(text)}`;
+
+      for (const target of users || []) {
+        try {
+          const ok = await sendMessage(target.id, broadcastText);
+          if (ok) {
+            sent += 1;
+          } else {
+            failed += 1;
+          }
+          await wait(80);
+        } catch (e) {
+          failed += 1;
+          err("broadcast failed:", target.id, e.message);
+        }
+      }
+
+      return sendMessage(
+        user.id,
+        `✅ Broadcast complete.\nSent: ${sent}\nFailed: ${failed}`
+      );
+    }
 
     if (msg === "/channels") {
       const { data } = await supabase
