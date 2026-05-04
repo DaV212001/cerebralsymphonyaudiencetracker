@@ -81,6 +81,84 @@ async function sendMessage(chatId, text, retry = 0) {
   }
 }
 
+async function sendTrackedMessage(chatId, text, retry = 0) {
+  try {
+    const response = await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: false,
+    });
+
+    return {
+      ok: true,
+      messageId: response.data?.result?.message_id,
+    };
+  } catch (e) {
+    const desc = e.response?.data?.description || "";
+
+    if (desc.includes("can't parse entities")) {
+      const response = await axios.post(`${TELEGRAM_API}/sendMessage`, {
+        chat_id: chatId,
+        text: text.replace(/<[^>]*>/g, ""),
+      });
+
+      return {
+        ok: true,
+        messageId: response.data?.result?.message_id,
+      };
+    }
+
+    if (retry < 4) {
+      await wait(1000 * 2 ** retry);
+      return sendTrackedMessage(chatId, text, retry + 1);
+    }
+
+    const error = e.response?.data?.description || e.message;
+    err("Telegram tracked send failed:", error);
+    return { ok: false, error };
+  }
+}
+
+async function editTrackedMessage(chatId, messageId, text, retry = 0) {
+  try {
+    await axios.post(`${TELEGRAM_API}/editMessageText`, {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: false,
+    });
+
+    return { ok: true };
+  } catch (e) {
+    const desc = e.response?.data?.description || "";
+
+    if (desc.includes("message is not modified")) {
+      return { ok: true };
+    }
+
+    if (desc.includes("can't parse entities")) {
+      await axios.post(`${TELEGRAM_API}/editMessageText`, {
+        chat_id: chatId,
+        message_id: messageId,
+        text: text.replace(/<[^>]*>/g, ""),
+      });
+
+      return { ok: true };
+    }
+
+    if (retry < 4) {
+      await wait(1000 * 2 ** retry);
+      return editTrackedMessage(chatId, messageId, text, retry + 1);
+    }
+
+    const error = e.response?.data?.description || e.message;
+    err("Telegram edit failed:", error);
+    return { ok: false, error };
+  }
+}
+
 // ----------------------
 // SAFE TIME
 // ----------------------
@@ -126,6 +204,10 @@ function channelDisplay(channel) {
   return channel?.username
     ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
     : `<b>${escapeHtml(channel?.title || "Channel")}</b>`;
+}
+
+function broadcastBody(text) {
+  return `📣 <b>Update from ChannelSubTracker</b>\n\n${escapeHtml(text)}`;
 }
 
 function batchMode(settings) {
@@ -407,7 +489,7 @@ if (msg === "/start") {
 
   return sendMessage(
     user.id,
-`👋 <b>Welcome to Cerebral Symphony Tracker</b>
+`👋 <b>Welcome to ChannelSubTracker</b>
 
 📊 <b>What this bot does:</b>
 • Tracks channel joins
@@ -431,6 +513,7 @@ if (msg === "/start") {
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
 /broadcast &lt;message&gt; — admin-only update message  
+/editbroadcast &lt;broadcast_id&gt; &lt;message&gt; — admin-only edit  
 /help — show help menu  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 
@@ -473,6 +556,7 @@ if (msg === "/help") {
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
 /broadcast &lt;message&gt; — admin-only update message  
+/editbroadcast &lt;broadcast_id&gt; &lt;message&gt; — admin-only edit  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 /help — show this menu  
 
@@ -502,18 +586,50 @@ Use the channel ID from /channels when unsubscribing.`
         return sendMessage(user.id, "❌ Could not load users for broadcast.");
       }
 
+      const { data: broadcast, error: broadcastError } = await supabase
+        .from("broadcasts")
+        .insert({
+          admin_user_id: user.id,
+          text,
+          header: "Update from ChannelSubTracker",
+        })
+        .select("id")
+        .single();
+
+      if (broadcastError || !broadcast) {
+        err("broadcast create failed:", broadcastError?.message);
+        return sendMessage(user.id, "❌ Could not create broadcast record.");
+      }
+
       let sent = 0;
       let failed = 0;
-      const broadcastText = `📣 <b>Update from ChannelSubTracker</b>\n\n${escapeHtml(text)}`;
+      const broadcastText = broadcastBody(text);
 
       for (const target of users || []) {
         try {
-          const ok = await sendMessage(target.id, broadcastText);
-          if (ok) {
+          const result = await sendTrackedMessage(target.id, broadcastText);
+          const status = result.ok && result.messageId ? "sent" : "failed";
+
+          if (status === "sent") {
             sent += 1;
           } else {
             failed += 1;
           }
+
+          const { error: messageInsertError } = await supabase
+            .from("broadcast_messages")
+            .insert({
+              broadcast_id: broadcast.id,
+              user_id: target.id,
+              message_id: result.messageId || null,
+              status,
+              error: result.error || null,
+            });
+
+          if (messageInsertError) {
+            err("broadcast message log failed:", messageInsertError.message);
+          }
+
           await wait(80);
         } catch (e) {
           failed += 1;
@@ -523,7 +639,88 @@ Use the channel ID from /channels when unsubscribing.`
 
       return sendMessage(
         user.id,
-        `✅ Broadcast complete.\nSent: ${sent}\nFailed: ${failed}`
+        `✅ Broadcast #${broadcast.id} complete.\nSent: ${sent}\nFailed: ${failed}\n\nEdit later with:\n/editbroadcast ${broadcast.id} &lt;new message&gt;`
+      );
+    }
+
+    if (msg.startsWith("/editbroadcast")) {
+      if (!ADMIN_USER_ID || user.id !== ADMIN_USER_ID) {
+        return sendMessage(user.id, "❌ You are not allowed to use this command.");
+      }
+
+      const match = msg.match(/^\/editbroadcast(?:@\w+)?\s+(\d+)\s+([\s\S]+)/i);
+
+      if (!match) {
+        return sendMessage(user.id, "❌ Usage: /editbroadcast &lt;broadcast_id&gt; &lt;message&gt;");
+      }
+
+      const broadcastId = Number(match[1]);
+      const text = match[2].trim();
+
+      if (!text) {
+        return sendMessage(user.id, "❌ Usage: /editbroadcast &lt;broadcast_id&gt; &lt;message&gt;");
+      }
+
+      const { data: messages, error: messagesError } = await supabase
+        .from("broadcast_messages")
+        .select("id, user_id, message_id")
+        .eq("broadcast_id", broadcastId)
+        .in("status", ["sent", "edited", "edit_failed"]);
+
+      if (messagesError) {
+        err("broadcast edit lookup failed:", messagesError.message);
+        return sendMessage(user.id, "❌ Could not load broadcast messages.");
+      }
+
+      if (!messages?.length) {
+        return sendMessage(user.id, "❌ No editable messages found for that broadcast.");
+      }
+
+      let edited = 0;
+      let failed = 0;
+      const nextText = broadcastBody(text);
+
+      for (const message of messages) {
+        const result = await editTrackedMessage(
+          message.user_id,
+          message.message_id,
+          nextText
+        );
+
+        const { error: updateError } = await supabase
+          .from("broadcast_messages")
+          .update({
+            status: result.ok ? "edited" : "edit_failed",
+            error: result.error || null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", message.id);
+
+        if (updateError) {
+          err("broadcast message edit log failed:", updateError.message);
+        }
+
+        if (result.ok) {
+          edited += 1;
+        } else {
+          failed += 1;
+        }
+
+        await wait(80);
+      }
+
+      await supabase
+        .from("broadcasts")
+        .update({
+          text,
+          edited_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", broadcastId);
+
+      return sendMessage(
+        user.id,
+        `✅ Broadcast #${broadcastId} edit complete.\nEdited: ${edited}\nFailed: ${failed}`
       );
     }
 

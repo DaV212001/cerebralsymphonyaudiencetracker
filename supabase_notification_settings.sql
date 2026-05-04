@@ -28,3 +28,28 @@ create unique index if not exists notification_batches_pending_unique
 
 create index if not exists notification_batches_flush_idx
   on public.notification_batches (status, flush_at);
+
+create table if not exists public.broadcasts (
+  id bigserial primary key,
+  admin_user_id bigint not null,
+  header text not null default 'Update from ChannelSubTracker',
+  text text not null,
+  edited_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.broadcast_messages (
+  id bigserial primary key,
+  broadcast_id bigint not null references public.broadcasts(id) on delete cascade,
+  user_id bigint not null,
+  message_id bigint,
+  status text not null default 'sent'
+    check (status in ('sent', 'failed', 'edited', 'edit_failed')),
+  error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists broadcast_messages_broadcast_idx
+  on public.broadcast_messages (broadcast_id, status);
