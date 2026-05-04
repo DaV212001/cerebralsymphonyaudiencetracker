@@ -90,6 +90,37 @@ function safeTime(cm) {
 }
 
 // ----------------------
+// ADMIN SETTINGS
+// ----------------------
+
+const DEFAULT_ADMIN_SETTINGS = {
+  notify_joins: true,
+  notify_leaves: true,
+  hide_usernames: false,
+};
+
+function adminSettings(row = {}) {
+  return {
+    notify_joins: row.notify_joins ?? DEFAULT_ADMIN_SETTINGS.notify_joins,
+    notify_leaves: row.notify_leaves ?? DEFAULT_ADMIN_SETTINGS.notify_leaves,
+    hide_usernames: row.hide_usernames ?? DEFAULT_ADMIN_SETTINGS.hide_usernames,
+  };
+}
+
+function notificationMode(settings) {
+  if (settings.notify_joins && settings.notify_leaves) return "joins and leaves";
+  if (settings.notify_joins) return "joins only";
+  if (settings.notify_leaves) return "leaves only";
+  return "off";
+}
+
+function channelDisplay(channel) {
+  return channel?.username
+    ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
+    : `<b>${escapeHtml(channel?.title || "Channel")}</b>`;
+}
+
+// ----------------------
 // WEBHOOK
 // ----------------------
 
@@ -237,6 +268,9 @@ if (msg === "/start") {
 📌 <b>Commands:</b>
 
 /channels — view your channels  
+/settings &lt;channel_id&gt; — view channel notification settings  
+/notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
+/hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /help — show help menu  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 
@@ -258,6 +292,8 @@ if (msg === "/help") {
 • Real-time join/leave tracking  
 • Automatic event logging  
 • Reliable retry system (no missed events)  
+• Choose all alerts, joins only, or leaves only  
+• Hide joiner/leaver usernames in notifications  
 
 ━━━━━━━━━━━━━━
 ⚙️ <b>How to Use:</b>
@@ -271,6 +307,9 @@ if (msg === "/help") {
 
 /start — setup instructions  
 /channels — list your channels  
+/settings &lt;channel_id&gt; — view notification settings  
+/notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
+/hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 /help — show this menu  
 
@@ -283,7 +322,7 @@ Use the channel ID from /channels when unsubscribing.`
     if (msg === "/channels") {
       const { data } = await supabase
         .from("channel_admins")
-        .select("channel_id, channels(title, username)")
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
         .eq("user_id", user.id);
 
       if (!data?.length) {
@@ -299,17 +338,117 @@ Use the channel ID from /channels when unsubscribing.`
           ? `<a href="https://t.me/${ch.username}">${escapeHtml(ch.title)}</a>`
           : `<b>${escapeHtml(ch?.title || "Unknown")}</b>`;
 
-        out += `• ${display}\n<code>${c.channel_id}</code>\n\n`;
+        const settings = adminSettings(c);
+        const usernameMode = settings.hide_usernames ? "hidden" : "visible";
+
+        out += `• ${display}\n<code>${c.channel_id}</code>\nAlerts: ${notificationMode(settings)}\nUsernames: ${usernameMode}\n\n`;
       }
 
       return sendMessage(user.id, out);
+    }
+
+    if (msg.startsWith("/settings")) {
+      const channelId = msg.split(/\s+/)[1];
+
+      if (!channelId) {
+        return sendMessage(user.id, "❌ Usage: /settings &lt;channel_id&gt;");
+      }
+
+      const { data: row, error: settingsError } = await supabase
+        .from("channel_admins")
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .single();
+
+      if (settingsError || !row) {
+        return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
+      }
+
+      const settings = adminSettings(row);
+      return sendMessage(
+        user.id,
+`⚙️ <b>Notification Settings</b>
+
+📢 ${channelDisplay(row.channels)}
+🆔 Channel ID: <code>${row.channel_id}</code>
+
+Alerts: <b>${notificationMode(settings)}</b>
+Usernames: <b>${settings.hide_usernames ? "hidden" : "visible"}</b>
+
+Commands:
+/notify ${row.channel_id} all
+/notify ${row.channel_id} joins
+/notify ${row.channel_id} leaves
+/hideuser ${row.channel_id} on
+/hideuser ${row.channel_id} off`
+      );
+    }
+
+    if (msg.startsWith("/notify")) {
+      const [, channelId, mode] = msg.split(/\s+/);
+      const allowedModes = new Set(["all", "joins", "leaves"]);
+
+      if (!channelId || !allowedModes.has(mode)) {
+        return sendMessage(user.id, "❌ Usage: /notify &lt;channel_id&gt; all|joins|leaves");
+      }
+
+      const nextSettings = {
+        notify_joins: mode !== "leaves",
+        notify_leaves: mode !== "joins",
+      };
+
+      const { data, error: updateError } = await supabase
+        .from("channel_admins")
+        .update(nextSettings)
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .single();
+
+      if (updateError || !data) {
+        return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
+      }
+
+      const settings = adminSettings(data);
+      return sendMessage(
+        user.id,
+        `✅ Alerts for ${channelDisplay(data.channels)} set to <b>${notificationMode(settings)}</b>.`
+      );
+    }
+
+    if (msg.startsWith("/hideuser")) {
+      const [, channelId, mode] = msg.split(/\s+/);
+      const allowedModes = new Set(["on", "off"]);
+
+      if (!channelId || !allowedModes.has(mode)) {
+        return sendMessage(user.id, "❌ Usage: /hideuser &lt;channel_id&gt; on|off");
+      }
+
+      const { data, error: updateError } = await supabase
+        .from("channel_admins")
+        .update({ hide_usernames: mode === "on" })
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .select("channel_id, notify_joins, notify_leaves, hide_usernames, channels(title, username)")
+        .single();
+
+      if (updateError || !data) {
+        return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
+      }
+
+      const settings = adminSettings(data);
+      return sendMessage(
+        user.id,
+        `✅ Usernames for ${channelDisplay(data.channels)} are now <b>${settings.hide_usernames ? "hidden" : "visible"}</b>.`
+      );
     }
 
     if (msg.startsWith("/unsubscribe")) {
       const channelId = msg.split(" ")[1];
 
       if (!channelId) {
-        return sendMessage(user.id, "❌ Usage: /unsubscribe <channel_id>");
+        return sendMessage(user.id, "❌ Usage: /unsubscribe &lt;channel_id&gt;");
       }
 
       const { data: ch } = await supabase
@@ -379,13 +518,25 @@ const channelLink = channel.username
   ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
   : `<b>${escapeHtml(channel.title)}</b>`;
 
-// ----------------------
-// FINAL MESSAGE (UPDATED FORMAT)
-// ----------------------
-const message = `
+const { data: admins } = await supabase
+  .from("channel_admins")
+  .select("user_id, notify_joins, notify_leaves, hide_usernames")
+  .eq("channel_id", channel.id);
+
+for (const a of admins || []) {
+  const settings = adminSettings(a);
+
+  if (isJoin && !settings.notify_joins) continue;
+  if (isLeave && !settings.notify_leaves) continue;
+
+  const userLine = settings.hide_usernames
+    ? (isJoin ? "A user joined" : "A user left")
+    : contactLink;
+
+  const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
-👤 ${contactLink}
+👤 ${userLine}
 ━━━━━━━━━━━━━━
 📢 ${channelLink}
 
@@ -394,12 +545,6 @@ const message = `
 ⏰ ${time.toLocaleString()}
 `;
 
-const { data: admins } = await supabase
-  .from("channel_admins")
-  .select("user_id")
-  .eq("channel_id", channel.id);
-
-for (const a of admins || []) {
   sendMessage(a.user_id, message);
 }
 
