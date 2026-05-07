@@ -53,3 +53,25 @@ create table if not exists public.broadcast_messages (
 
 create index if not exists broadcast_messages_broadcast_idx
   on public.broadcast_messages (broadcast_id, status);
+
+create table if not exists public.subscriber_goals (
+  id bigserial primary key,
+  user_id bigint not null,
+  channel_id bigint not null,
+  target_count integer not null check (target_count > 0),
+  last_count integer not null default 0,
+  active boolean not null default true,
+  channel_title text,
+  channel_username text,
+  achieved_at timestamptz,
+  celebration_sent_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists subscriber_goals_active_unique
+  on public.subscriber_goals (user_id, channel_id)
+  where active = true;
+
+create index if not exists subscriber_goals_channel_idx
+  on public.subscriber_goals (channel_id, active);

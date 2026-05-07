@@ -14,6 +14,9 @@ app.use(express.json({ limit: "1mb" }));
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ADMIN_USER_ID = Number(process.env.ADMIN_USER_ID || 0);
+const GOAL_CELEBRATION_GIF_URL =
+  process.env.GOAL_CELEBRATION_GIF_URL ||
+  "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -159,6 +162,35 @@ async function editTrackedMessage(chatId, messageId, text, retry = 0) {
   }
 }
 
+async function sendAnimation(chatId, animation, caption, retry = 0) {
+  try {
+    await axios.post(`${TELEGRAM_API}/sendAnimation`, {
+      chat_id: chatId,
+      animation,
+      caption,
+      parse_mode: "HTML",
+    });
+
+    return true;
+  } catch (e) {
+    if (retry < 4) {
+      await wait(1000 * 2 ** retry);
+      return sendAnimation(chatId, animation, caption, retry + 1);
+    }
+
+    err("Telegram animation send failed:", e.response?.data || e.message);
+    return false;
+  }
+}
+
+async function getChannelMemberCount(channelId) {
+  const response = await axios.post(`${TELEGRAM_API}/getChatMemberCount`, {
+    chat_id: channelId,
+  });
+
+  return Number(response.data?.result || 0);
+}
+
 // ----------------------
 // SAFE TIME
 // ----------------------
@@ -210,6 +242,14 @@ function broadcastBody(text) {
   return `📣 <b>Update from ChannelSubTracker</b>\n\n${escapeHtml(text)}`;
 }
 
+function adminCommandLines(user) {
+  if (!ADMIN_USER_ID || user.id !== ADMIN_USER_ID) return "";
+
+  return `
+/broadcast &lt;message&gt; — admin-only update message
+/editbroadcast &lt;broadcast_id&gt; &lt;message&gt; — admin-only edit`;
+}
+
 function batchMode(settings) {
   const seconds = Number(settings.batch_window_seconds || 0);
   if (!seconds) return "instant";
@@ -232,6 +272,76 @@ function parseBatchWindow(value) {
 
   if (seconds < 10 || seconds > 3600) return null;
   return seconds;
+}
+
+function goalMessage(goal, channel, count) {
+  const remaining = Math.max(goal.target_count - count, 0);
+
+  if (!remaining) {
+    return `🎉 <b>Subscriber Goal Reached!</b>
+
+${channelDisplay(channel)}
+Goal: <b>${goal.target_count}</b>
+Current: <b>${count}</b>`;
+  }
+
+  return `🎯 <b>Subscriber Goal Progress</b>
+
+${channelDisplay(channel)}
+Goal: <b>${goal.target_count}</b>
+Current: <b>${count}</b>
+Remaining: <b>${remaining}</b>`;
+}
+
+async function handleGoalProgress({ admin, channel, isJoin, isLeave }) {
+  const { data: goal, error: goalError } = await supabase
+    .from("subscriber_goals")
+    .select("*")
+    .eq("user_id", admin.user_id)
+    .eq("channel_id", channel.id)
+    .eq("active", true)
+    .maybeSingle();
+
+  if (goalError) {
+    err("goal lookup failed:", goalError.message);
+    return;
+  }
+
+  if (!goal) return;
+
+  const delta = isJoin ? 1 : isLeave ? -1 : 0;
+  const nextCount = Math.max(Number(goal.last_count || 0) + delta, 0);
+  const reached = nextCount >= goal.target_count;
+  const now = new Date().toISOString();
+
+  await supabase
+    .from("subscriber_goals")
+    .update({
+      last_count: nextCount,
+      active: reached ? false : true,
+      achieved_at: reached ? now : goal.achieved_at,
+      celebration_sent_at: reached ? now : goal.celebration_sent_at,
+      channel_title: channel.title,
+      channel_username: channel.username || null,
+      updated_at: now,
+    })
+    .eq("id", goal.id);
+
+  if (reached) {
+    await sendMessage(admin.user_id, goalMessage(goal, channel, nextCount));
+
+    if (GOAL_CELEBRATION_GIF_URL) {
+      await sendAnimation(
+        admin.user_id,
+        GOAL_CELEBRATION_GIF_URL,
+        `🎉 ${escapeHtml(channel.title)} reached ${goal.target_count} subscribers!`
+      );
+    }
+
+    return;
+  }
+
+  await sendMessage(admin.user_id, goalMessage(goal, channel, nextCount));
 }
 
 // ----------------------
@@ -495,6 +605,7 @@ if (msg === "/start") {
 • Tracks channel joins
 • Tracks channel leaves
 • Sends real-time alerts
+• Tracks subscriber goals
 • Stores event history reliably
 
 ━━━━━━━━━━━━━━
@@ -512,8 +623,9 @@ if (msg === "/start") {
 /notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
-/broadcast &lt;message&gt; — admin-only update message  
-/editbroadcast &lt;broadcast_id&gt; &lt;message&gt; — admin-only edit  
+/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber goal  
+/goalstatus &lt;channel_id&gt; — view subscriber goal  
+/goaloff &lt;channel_id&gt; — clear subscriber goal${adminCommandLines(user)}  
 /help — show help menu  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 
@@ -538,6 +650,7 @@ if (msg === "/help") {
 • Choose all alerts, joins only, or leaves only  
 • Hide joiner/leaver usernames in notifications  
 • Batch rapid activity into summary notifications  
+• Set subscriber goals and celebrate milestones  
 
 ━━━━━━━━━━━━━━
 ⚙️ <b>How to Use:</b>
@@ -555,8 +668,9 @@ if (msg === "/help") {
 /notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
 /hideuser &lt;channel_id&gt; on|off — hide or show usernames  
 /batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
-/broadcast &lt;message&gt; — admin-only update message  
-/editbroadcast &lt;broadcast_id&gt; &lt;message&gt; — admin-only edit  
+/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber goal  
+/goalstatus &lt;channel_id&gt; — view subscriber goal  
+/goaloff &lt;channel_id&gt; — clear subscriber goal${adminCommandLines(user)}  
 /unsubscribe &lt;channel_id&gt; — stop tracking  
 /help — show this menu  
 
@@ -789,7 +903,10 @@ Commands:
 /hideuser ${row.channel_id} on
 /hideuser ${row.channel_id} off
 /batch ${row.channel_id} off
-/batch ${row.channel_id} 1m`
+/batch ${row.channel_id} 1m
+/goal ${row.channel_id} 1000
+/goalstatus ${row.channel_id}
+/goaloff ${row.channel_id}`
       );
     }
 
@@ -879,6 +996,137 @@ Commands:
       );
     }
 
+    if (msg.startsWith("/goalstatus")) {
+      const channelId = msg.split(/\s+/)[1];
+
+      if (!channelId) {
+        return sendMessage(user.id, "❌ Usage: /goalstatus &lt;channel_id&gt;");
+      }
+
+      const { data: goal, error: goalError } = await supabase
+        .from("subscriber_goals")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .eq("active", true)
+        .maybeSingle();
+
+      if (goalError) {
+        err("goal status lookup failed:", goalError.message);
+        return sendMessage(user.id, "❌ Could not load subscriber goal.");
+      }
+
+      if (!goal) {
+        return sendMessage(user.id, "📭 No active subscriber goal for that channel.");
+      }
+
+      return sendMessage(
+        user.id,
+        goalMessage(
+          goal,
+          { title: goal.channel_title, username: goal.channel_username },
+          goal.last_count
+        )
+      );
+    }
+
+    if (msg.startsWith("/goaloff")) {
+      const channelId = msg.split(/\s+/)[1];
+
+      if (!channelId) {
+        return sendMessage(user.id, "❌ Usage: /goaloff &lt;channel_id&gt;");
+      }
+
+      const { error: clearError } = await supabase
+        .from("subscriber_goals")
+        .update({
+          active: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .eq("active", true);
+
+      if (clearError) {
+        err("goal clear failed:", clearError.message);
+        return sendMessage(user.id, "❌ Could not clear subscriber goal.");
+      }
+
+      return sendMessage(user.id, "✅ Subscriber goal cleared.");
+    }
+
+    if (msg.startsWith("/goal")) {
+      const [, channelId, targetValue] = msg.split(/\s+/);
+      const targetCount = Number(targetValue);
+
+      if (!channelId || !Number.isInteger(targetCount) || targetCount < 1) {
+        return sendMessage(user.id, "❌ Usage: /goal &lt;channel_id&gt; &lt;target_count&gt;");
+      }
+
+      const { data: channelAdmin, error: channelError } = await supabase
+        .from("channel_admins")
+        .select("channel_id, channels(title, username)")
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .single();
+
+      if (channelError || !channelAdmin) {
+        return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
+      }
+
+      let currentCount;
+      try {
+        currentCount = await getChannelMemberCount(channelId);
+      } catch (e) {
+        err("member count lookup failed:", e.response?.data || e.message);
+        return sendMessage(
+          user.id,
+          "❌ Could not read the channel member count. Make sure the bot is still an admin."
+        );
+      }
+
+      if (targetCount <= currentCount) {
+        return sendMessage(
+          user.id,
+          `❌ Target must be above the current count (${currentCount}).`
+        );
+      }
+
+      const channel = channelAdmin.channels || {};
+      const now = new Date().toISOString();
+
+      await supabase
+        .from("subscriber_goals")
+        .update({ active: false, updated_at: now })
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .eq("active", true);
+
+      const { data: goal, error: goalError } = await supabase
+        .from("subscriber_goals")
+        .insert({
+          user_id: user.id,
+          channel_id: channelId,
+          target_count: targetCount,
+          last_count: currentCount,
+          active: true,
+          channel_title: channel.title || "Channel",
+          channel_username: channel.username || null,
+        })
+        .select("*")
+        .single();
+
+      if (goalError || !goal) {
+        err("goal create failed:", goalError?.message);
+        return sendMessage(user.id, "❌ Could not create subscriber goal.");
+      }
+
+      return sendMessage(
+        user.id,
+        `✅ Subscriber goal set.\n\n${goalMessage(goal, channel, currentCount)}`
+      );
+    }
+
     if (msg.startsWith("/unsubscribe")) {
       const channelId = msg.split(" ")[1];
 
@@ -960,6 +1208,12 @@ const { data: admins } = await supabase
 
 for (const a of admins || []) {
   const settings = adminSettings(a);
+
+  try {
+    await handleGoalProgress({ admin: a, channel, isJoin, isLeave });
+  } catch (e) {
+    err("goal progress failed:", e.message);
+  }
 
   if (isJoin && !settings.notify_joins) continue;
   if (isLeave && !settings.notify_leaves) continue;
