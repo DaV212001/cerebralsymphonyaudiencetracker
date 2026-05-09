@@ -1155,6 +1155,60 @@ Commands:
   }
 
   // ----------------------
+  // BOT ADDED TO CHANNEL (my_chat_member)
+  // ----------------------
+  const myCm = update.my_chat_member;
+  if (myCm) {
+    const channel = myCm.chat;
+    const fromUser = myCm.from;
+    const newStatus = myCm.new_chat_member.status;
+
+    if (newStatus === "administrator") {
+      // 1. Ensure channel exists in channels table
+      await supabase.from("channels").upsert({
+        id: channel.id,
+        title: channel.title,
+        username: channel.username || null,
+      });
+
+      // 2. Ensure user exists in users table
+      await supabase.from("users").upsert({
+        id: fromUser.id,
+        username: fromUser.username || fromUser.first_name,
+      });
+
+      // 3. Link the admin who added the bot
+      const { data: existingAdmin } = await supabase
+        .from("channel_admins")
+        .select("channel_id")
+        .eq("channel_id", channel.id)
+        .eq("user_id", fromUser.id)
+        .maybeSingle();
+
+      if (!existingAdmin) {
+        const { error: adminErr } = await supabase.from("channel_admins").insert({
+          channel_id: channel.id,
+          user_id: fromUser.id,
+        });
+
+        if (adminErr) {
+          err("Failed to link channel admin:", adminErr.message);
+        } else {
+          const link = channel.username
+            ? `<a href="https://t.me/${channel.username}">${escapeHtml(channel.title)}</a>`
+            : `<b>${escapeHtml(channel.title)}</b>`;
+
+          await sendMessage(
+            fromUser.id,
+            `✅ <b>Success!</b> I am now tracking ${link}.\n\nUse /settings ${channel.id} to configure notifications.`
+          );
+        }
+      }
+    }
+    return;
+  }
+
+  // ----------------------
   // JOIN / LEAVE EVENTS (NO user guard)
   // ----------------------
 
