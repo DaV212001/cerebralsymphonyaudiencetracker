@@ -50,6 +50,7 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
+
 // ----------------------
 // TELEGRAM SENDER
 // ----------------------
@@ -538,32 +539,34 @@ async function worker() {
       return setTimeout(worker, 1200);
     }
 
-    for (const item of items) {
-      try {
-        await handleUpdate(item.payload);
+    await Promise.allSettled(
+      items.map(async (item) => {
+        try {
+          await handleUpdate(item.payload);
 
-        await supabase
-          .from("event_queue")
-          .update({ status: "done" })
-          .eq("id", item.id);
+          await supabase
+            .from("event_queue")
+            .update({ status: "done" })
+            .eq("id", item.id);
 
-      } catch (e) {
-        const retry = (item.retry_count || 0) + 1;
+        } catch (e) {
+          const retry = (item.retry_count || 0) + 1;
 
-        await supabase
-          .from("event_queue")
-          .update({
-            status: retry >= 5 ? "dead" : "pending",
-            retry_count: retry,
-            next_retry_at: new Date(
-              Date.now() + Math.min(60000 * retry, 900000)
-            ).toISOString(),
-          })
-          .eq("id", item.id);
+          await supabase
+            .from("event_queue")
+            .update({
+              status: retry >= 5 ? "dead" : "pending",
+              retry_count: retry,
+              next_retry_at: new Date(
+                Date.now() + Math.min(60000 * retry, 900000)
+              ).toISOString(),
+            })
+            .eq("id", item.id);
 
-        err("retry:", item.update_id, retry);
-      }
-    }
+          err("retry:", item.update_id, retry);
+        }
+      })
+    );
   } catch (e) {
     err("worker crash:", e.message);
   }
@@ -1260,34 +1263,31 @@ const { data: admins } = await supabase
   .select("user_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds")
   .eq("channel_id", channel.id);
 
-for (const a of admins || []) {
-  const settings = adminSettings(a);
+await Promise.allSettled(
+  (admins || []).map(async (a) => {
+    const settings = adminSettings(a);
 
-  try {
-    await handleGoalProgress({ admin: a, channel, isJoin, isLeave });
-  } catch (e) {
-    err("goal progress failed:", e.message);
-  }
+    const shouldNotify = isJoin
+      ? settings.notify_joins
+      : settings.notify_leaves;
 
-  if (isJoin && !settings.notify_joins) continue;
-  if (isLeave && !settings.notify_leaves) continue;
+    // Build notification payload before firing anything
+    let notifyPromise;
+    if (shouldNotify) {
+      if (settings.batch_window_seconds > 0) {
+        notifyPromise = queueBatchNotification({
+          admin: a,
+          settings,
+          channel,
+          eventType: isJoin ? "JOIN" : "LEAVE",
+          time,
+        });
+      } else {
+        const userLine = settings.hide_usernames
+          ? (isJoin ? "A user joined" : "A user left")
+          : contactLink;
 
-  if (settings.batch_window_seconds > 0) {
-    await queueBatchNotification({
-      admin: a,
-      settings,
-      channel,
-      eventType: isJoin ? "JOIN" : "LEAVE",
-      time,
-    });
-    continue;
-  }
-
-  const userLine = settings.hide_usernames
-    ? (isJoin ? "A user joined" : "A user left")
-    : contactLink;
-
-  const message = `
+        const message = `
 <b>${isJoin ? "🟢 JOIN" : "🔴 LEAVE"}</b>
 
 👤 ${userLine}
@@ -1298,9 +1298,21 @@ for (const a of admins || []) {
 ━━━━━━━━━━━━━━
 ⏰ ${time.toLocaleString()}
 `;
+        notifyPromise = sendMessage(a.user_id, message);
+      }
+    } else {
+      notifyPromise = Promise.resolve();
+    }
 
-  sendMessage(a.user_id, message);
-}
+    // Goal progress check and notification run at the same time
+    await Promise.all([
+      handleGoalProgress({ admin: a, channel, isJoin, isLeave }).catch((e) => {
+        err("goal progress failed:", e.message);
+      }),
+      notifyPromise,
+    ]);
+  })
+);
 
 // DB log
 const { error: eventInsertError } = await supabase.from("events").insert({
