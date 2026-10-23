@@ -675,18 +675,37 @@ Commands:
       );
     }
 
+    const isSuperadmin = ADMIN_USER_ID && user.id === ADMIN_USER_ID;
+
     const { data: adminChannels, error: adminChannelsError } = await supabase
       .from("channel_admins")
       .select("channel_id, channels(title, username)")
       .eq("user_id", user.id);
 
-    if (adminChannelsError || !adminChannels?.length) {
-      return sendMessage(user.id, "📭 No channels connected to your account.");
-    }
+    let channelsToSearch = adminChannels || [];
 
-    let channelsToSearch = adminChannels;
-    if (explicitChannelId) {
-      const found = adminChannels.find(
+    // Superadmin fallback if not explicitly subscribed in channel_admins
+    if (isSuperadmin && (!channelsToSearch.length || explicitChannelId)) {
+      if (explicitChannelId) {
+        const { data: ch } = await supabase
+          .from("channels")
+          .select("id, title, username")
+          .eq("id", explicitChannelId)
+          .maybeSingle();
+        if (ch) {
+          channelsToSearch = [{ channel_id: ch.id, channels: ch }];
+        }
+      } else {
+        const { data: allChannels } = await supabase
+          .from("channels")
+          .select("id, title, username");
+        channelsToSearch = (allChannels || []).map((c) => ({
+          channel_id: c.id,
+          channels: c,
+        }));
+      }
+    } else if (explicitChannelId) {
+      const found = channelsToSearch.find(
         (c) => String(c.channel_id) === String(explicitChannelId)
       );
       if (!found) {
@@ -695,27 +714,69 @@ Commands:
       channelsToSearch = [found];
     }
 
+    if (!channelsToSearch.length) {
+      return sendMessage(
+        user.id,
+        "📭 No channels connected to your account. Use /channels to verify your registered channels."
+      );
+    }
+
     const clean = target.replace(/^@/, "").trim();
     const isNumeric = /^-?\d+$/.test(clean) && !target.startsWith("@");
 
+    // Attempt to resolve cross-event user_id or username to ensure 100% backwards compatibility
+    let resolvedUserId = isNumeric ? Number(clean) : null;
+    let resolvedUsername = !isNumeric ? clean : null;
+
+    if (!resolvedUserId) {
+      const { data: matchedEvents } = await supabase
+        .from("events")
+        .select("user_id, username")
+        .or(`username.ilike.${clean},username.ilike.@${clean}`)
+        .not("user_id", "is", null)
+        .limit(1);
+
+      if (matchedEvents?.length) {
+        resolvedUserId = matchedEvents[0].user_id;
+      }
+    }
+
+    if (resolvedUserId && !resolvedUsername) {
+      const { data: matchedEvents } = await supabase
+        .from("events")
+        .select("username")
+        .eq("user_id", resolvedUserId)
+        .not("username", "is", null)
+        .limit(1);
+
+      if (matchedEvents?.length && matchedEvents[0].username) {
+        resolvedUsername = matchedEvents[0].username.replace(/^@/, "");
+      }
+    }
+
+    // Build flexible OR filter that matches across all legacy and current formats
+    const orConditions = [`username.ilike.${clean}`, `username.ilike.@${clean}`];
+    if (resolvedUserId) {
+      orConditions.push(`user_id.eq.${resolvedUserId}`);
+    }
+    if (isNumeric) {
+      orConditions.push(`user_id.eq.${clean}`);
+    }
+    if (resolvedUsername && resolvedUsername.toLowerCase() !== clean.toLowerCase()) {
+      orConditions.push(`username.ilike.${resolvedUsername}`);
+      orConditions.push(`username.ilike.@${resolvedUsername}`);
+    }
+
+    const orFilter = orConditions.join(",");
     let reportsSent = 0;
 
     for (const ch of channelsToSearch) {
-      let query = supabase
+      const { data: events, error: eventsError } = await supabase
         .from("events")
         .select("*")
-        .eq("channel_id", ch.channel_id);
-
-      if (isNumeric) {
-        query = query.eq("user_id", Number(clean));
-      } else {
-        query = query.ilike("username", clean);
-      }
-
-      const { data: events, error: eventsError } = await query.order(
-        "created_at",
-        { ascending: true }
-      );
+        .eq("channel_id", ch.channel_id)
+        .or(orFilter)
+        .order("created_at", { ascending: true });
 
       if (eventsError) {
         err("history query failed:", eventsError.message);

@@ -114,15 +114,28 @@ async function handleChatMember(update) {
   const admins = await getCachedChannelAdmins(channel.id);
 
   let priorJoinCount = 0;
-  if (isJoin && u?.id) {
+  if (isJoin) {
     try {
-      const { count } = await supabase
+      let q = supabase
         .from("events")
         .select("*", { count: "exact", head: true })
         .eq("channel_id", channel.id)
-        .eq("user_id", u.id)
         .eq("event_type", "JOIN");
-      priorJoinCount = count || 0;
+
+      const orParts = [];
+      if (u?.id) orParts.push(`user_id.eq.${u.id}`);
+      const rawUser = u?.username || u?.first_name;
+      if (rawUser) {
+        const cleanU = rawUser.replace(/^@/, "");
+        orParts.push(`username.ilike.${cleanU}`);
+        orParts.push(`username.ilike.@${cleanU}`);
+      }
+
+      if (orParts.length) {
+        q = q.or(orParts.join(","));
+        const { count } = await q;
+        priorJoinCount = count || 0;
+      }
     } catch (e) {
       // Non-fatal check
     }
