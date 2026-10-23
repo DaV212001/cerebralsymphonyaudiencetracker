@@ -56,7 +56,7 @@ async function handleCommand(msg, user) {
 ━━━━━━━━━━━━━━
 ⚙️ <b>Quick Setup:</b>
 1️⃣ Add this bot as an <b>ADMIN</b> in your Telegram channel  
-2️⃣ Enable <b>"View Members"</b> (or "Invite Users via Link")  
+2️⃣ No special permissions required (you can turn off all other admin permissions)  
 3️⃣ Send /channels to open your interactive control dashboard  
 
 ━━━━━━━━━━━━━━
@@ -95,9 +95,9 @@ async function handleCommand(msg, user) {
 • Open your Telegram Channel settings ➔ <b>Administrators</b> ➔ <b>Add Administrator</b>.
 • Search for <code>@channelsubcribertrackerbot</code> and add it.
 
-2️⃣ <b>Grant Permissions:</b>
-• Enable <b>"View Members"</b> (or "Invite Users via Link").
-• <i>(Telegram requires this permission so it can dispatch join & leave events to the bot.)</i>
+2️⃣ <b>Permissions:</b>
+• <b>No special permissions needed!</b> Simply add the bot as Administrator.
+• You can safely leave all administrative rights turned <b>OFF</b> (e.g. post messages, delete messages, ban users, etc.). The bot only needs the admin role for Telegram to dispatch member join & leave events.
 
 3️⃣ <b>Confirm Connection:</b>
 • Return to this chat and send <b>/channels</b>.
@@ -432,7 +432,7 @@ Send <b>/channels</b> or <b>/settings</b> to open the 1-tap dashboard:
     if (!data?.length) {
       return sendMessage(
         user.id,
-        "📭 No channels connected.\n\nAdd this bot as an ADMIN to your channel with 'View Members' permission to begin tracking."
+        "📭 No channels connected.\n\nAdd this bot as an ADMIN to your channel to begin tracking (no special permissions required)."
       );
     }
 
