@@ -207,11 +207,16 @@ async function getChatMember(channelId, userId) {
 
 async function setBotCommands(commands = BOT_COMMANDS) {
   try {
-    const response = await axios.post(`${TELEGRAM_API}/setMyCommands`, {
+    await axios.post(`${TELEGRAM_API}/setMyCommands`, {
       commands,
+      scope: { type: "default" },
     });
-    log("Bot commands updated successfully on Telegram");
-    return response.data?.result || true;
+    await axios.post(`${TELEGRAM_API}/setMyCommands`, {
+      commands,
+      scope: { type: "all_private_chats" },
+    });
+    log("Bot commands updated successfully on Telegram for default & private chat scopes");
+    return true;
   } catch (e) {
     err("Telegram setMyCommands failed:", e.response?.data || e.message);
     return false;
