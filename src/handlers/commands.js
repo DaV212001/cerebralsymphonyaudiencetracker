@@ -202,6 +202,101 @@ Send /channels or /settings to open the control panel. You can toggle:
   }
 
   // ----------------------
+  // RESUME BROADCAST (Superadmin)
+  // ----------------------
+  if (msg.startsWith("/resumebroadcast")) {
+    if (!ADMIN_USER_ID || user.id !== ADMIN_USER_ID) {
+      return sendMessage(user.id, "❌ You are not allowed to use this command.");
+    }
+
+    const parts = msg.trim().split(/\s+/);
+    let broadcastId = parts[1] ? Number(parts[1]) : null;
+
+    if (!broadcastId) {
+      const { data: latest } = await supabase
+        .from("broadcasts")
+        .select("id, text")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!latest) {
+        return sendMessage(user.id, "❌ No previous broadcasts found to resume.");
+      }
+      broadcastId = latest.id;
+    }
+
+    const { data: broadcast, error: broadcastError } = await supabase
+      .from("broadcasts")
+      .select("*")
+      .eq("id", broadcastId)
+      .maybeSingle();
+
+    if (broadcastError || !broadcast) {
+      return sendMessage(user.id, `❌ Broadcast #${broadcastId} not found.`);
+    }
+
+    const { data: users } = await supabase.from("users").select("id");
+    const { data: sentMessages } = await supabase
+      .from("broadcast_messages")
+      .select("user_id")
+      .eq("broadcast_id", broadcastId)
+      .eq("status", "sent");
+
+    const sentSet = new Set((sentMessages || []).map((m) => m.user_id));
+    const pendingUsers = (users || []).filter((u) => !sentSet.has(u.id));
+
+    if (!pendingUsers.length) {
+      return sendMessage(
+        user.id,
+        `✅ Broadcast #${broadcastId} has already been sent to all registered users! (Total delivered: ${sentSet.size})`
+      );
+    }
+
+    await sendMessage(
+      user.id,
+      `⏳ Resuming Broadcast #${broadcastId} for ${pendingUsers.length} remaining users (skipping ${sentSet.size} already sent)...`
+    );
+
+    let sent = 0;
+    let failed = 0;
+    const broadcastText = broadcastBody(broadcast.text);
+
+    for (const target of pendingUsers) {
+      try {
+        const result = await sendTrackedMessage(target.id, broadcastText);
+        const status = result.ok && result.messageId ? "sent" : "failed";
+
+        if (status === "sent") {
+          sent += 1;
+        } else {
+          failed += 1;
+        }
+
+        await supabase
+          .from("broadcast_messages")
+          .upsert({
+            broadcast_id: broadcastId,
+            user_id: target.id,
+            message_id: result.messageId || null,
+            status,
+            error: result.error || null,
+          });
+
+        await wait(80);
+      } catch (e) {
+        failed += 1;
+        err("resume broadcast failed:", target.id, e.message);
+      }
+    }
+
+    return sendMessage(
+      user.id,
+      `✅ Broadcast #${broadcastId} resume complete.\nNewly Sent: ${sent}\nFailed (unstarted/blocked): ${failed}\nTotal Delivered: ${sentSet.size + sent}/${users.length}`
+    );
+  }
+
+  // ----------------------
   // EDIT BROADCAST (Superadmin)
   // ----------------------
   if (msg.startsWith("/editbroadcast")) {

@@ -77,6 +77,7 @@ function adminCommandLines(user) {
 
   return `
 /broadcast &lt;message&gt; — admin-only update message
+/resumebroadcast [broadcast_id] — resume incomplete broadcast without duplicates
 /editbroadcast &lt;broadcast_id&gt; &lt;message&gt; — admin-only edit`;
 }
 
