@@ -3,23 +3,54 @@ const { channelDisplay, escapeHtml } = require("../utils/helpers");
 const { sendMessage, sendAnimation } = require("./telegram");
 const { err } = require("../utils/logger");
 
-function goalMessage(goal, channel, count) {
-  const remaining = Math.max(goal.target_count - count, 0);
+/**
+ * Renders a high-resolution Unicode visual progress bar.
+ * @param {number} current - Current subscriber count.
+ * @param {number} target - Target subscriber count.
+ * @param {number} length - Number of bar characters (default 12).
+ * @returns {string} E.g. "[█████████░░░] 74.2%"
+ */
+function renderProgressBar(current, target, length = 12) {
+  const cur = Number(current) || 0;
+  const tgt = Number(target) || 0;
+  if (tgt <= 0) return "";
+  const ratio = Math.max(0, cur / tgt);
+  const percentClamped = Math.min(ratio, 1.0);
+  const filled = Math.round(percentClamped * length);
+  const empty = length - filled;
+  const bar = "█".repeat(filled) + "░".repeat(empty);
+  const pctStr = (ratio * 100).toFixed(1);
+  return `[${bar}] ${pctStr}%`;
+}
 
-  if (!remaining) {
+function goalMessage(goal, channel, count) {
+  const target = Number(goal.target_count) || 0;
+  const current = Number(count) || 0;
+  const remaining = Math.max(target - current, 0);
+  const bar = renderProgressBar(current, target);
+
+  if (remaining <= 0) {
     return `🎉 <b>Subscriber Goal Reached!</b>
 
 ${channelDisplay(channel)}
-Goal: <b>${goal.target_count}</b>
-Current: <b>${count}</b>`;
+
+🎯 Goal Target: <b>${target.toLocaleString()}</b>
+👥 Current Count: <b>${current.toLocaleString()}</b>
+📊 Progress: <code>${bar}</code>
+
+🏆 <i>Milestone achieved! To set a new goal, send:</i>
+<code>/goal ${goal.channel_id} &lt;target&gt;</code>`;
   }
 
   return `🎯 <b>Subscriber Goal Progress</b>
 
 ${channelDisplay(channel)}
-Goal: <b>${goal.target_count}</b>
-Current: <b>${count}</b>
-Remaining: <b>${remaining}</b>`;
+🆔 Channel ID: <code>${goal.channel_id}</code>
+
+📊 Progress: <code>${bar}</code>
+🎯 Target: <b>${target.toLocaleString()}</b>
+👥 Current: <b>${current.toLocaleString()}</b>
+⏳ Remaining: <b>${remaining.toLocaleString()}</b>`;
 }
 
 async function handleGoalProgress({ admin, channel, isJoin, isLeave }) {
@@ -74,6 +105,7 @@ async function handleGoalProgress({ admin, channel, isJoin, isLeave }) {
 }
 
 module.exports = {
+  renderProgressBar,
   goalMessage,
   handleGoalProgress,
 };

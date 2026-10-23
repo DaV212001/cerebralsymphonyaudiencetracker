@@ -1,7 +1,12 @@
 const { handleCommand } = require("./commands");
+const { handleCallbackQuery } = require("./callbacks");
 const { handleMyChatMember, handleChatMember } = require("./events");
 
 async function handleUpdate(update) {
+  if (update.callback_query) {
+    return handleCallbackQuery(update.callback_query);
+  }
+
   const msg = update.message?.text;
   const user = update.message?.from;
 

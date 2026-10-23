@@ -188,7 +188,23 @@ async function handleChatMember(update) {
 ━━━━━━━━━━━━━━
 ⏰ ${time.toLocaleString()}
 `;
-          notifyPromise = sendMessage(a.user_id, message);
+          const buttons = [];
+          const quickRow = [];
+          if (!settings.hide_usernames && u?.id) {
+            quickRow.push({
+              text: "👤 Member Dossier",
+              callback_data: `cb:dossier:${channel.id}:${u.id}`,
+            });
+          }
+          quickRow.push({
+            text: "⚙️ Dashboard",
+            callback_data: `cb:ch_view:${channel.id}`,
+          });
+          buttons.push(quickRow);
+
+          notifyPromise = sendMessage(a.user_id, message, {
+            reply_markup: { inline_keyboard: buttons },
+          });
         }
       } else {
         notifyPromise = Promise.resolve();

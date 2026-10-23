@@ -14,6 +14,12 @@ const {
   buildPreExistingMemberReport,
 } = require("../reports/subscriberHistory");
 const {
+  buildDashboardView,
+  buildChannelsListView,
+  buildGoalDetailView,
+  buildRejoinersDetailView,
+} = require("../views/dashboard");
+const {
   escapeHtml,
   adminSettings,
   notificationMode,
@@ -40,38 +46,37 @@ async function handleCommand(msg, user) {
       user.id,
 `👋 <b>Welcome to ChannelSubTracker</b>
 
-📊 <b>What this bot does:</b>
-• Tracks channel joins
-• Tracks channel leaves
-• Sends real-time alerts
-• Tracks subscriber goals
-• Stores event history reliably
+📊 <b>Core Capabilities:</b>
+• <b>Real-time Alerts:</b> Instant notifications for joins & leaves with quick action buttons
+• <b>Interactive Dashboard:</b> 1-tap toggles for alerts, username privacy, and batching
+• <b>Subscriber Lifecycle Dossier:</b> Track member stints, join dates, and cumulative tenure
+• <b>Churn & Re-joiners:</b> Detect returning subscribers & churn cycles
+• <b>Milestone Goals:</b> Live Unicode progress bars and milestone celebrations
 
 ━━━━━━━━━━━━━━
-⚙️ <b>Setup Instructions:</b>
-
-1️⃣ Add this bot as an <b>ADMIN</b> in your channel  
-2️⃣ Enable <b>"View Members"</b> permission  
-3️⃣ Send /channels to confirm connection  
+⚙️ <b>Quick Setup:</b>
+1️⃣ Add this bot as an <b>ADMIN</b> in your Telegram channel  
+2️⃣ Enable <b>"View Members"</b> (or "Invite Users via Link")  
+3️⃣ Send /channels to open your interactive control dashboard  
 
 ━━━━━━━━━━━━━━
-📌 <b>Commands:</b>
-
-/channels — view your channels  
+📌 <b>Menu Commands:</b>
+/channels — interactive channel control dashboard  
+/settings [channel_id] — channel configuration & alert toggles  
 /history &lt;@user|id&gt; [channel_id] — view subscriber lifecycle dossier  
-/rejoiners [channel_id] — view repeat/re-joining subscribers  
-/settings &lt;channel_id&gt; — view channel notification settings  
-/notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
-/hideuser &lt;channel_id&gt; on|off — hide or show usernames  
-/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
-/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber goal  
-/goalstatus &lt;channel_id&gt; — view subscriber goal  
-/goaloff &lt;channel_id&gt; — clear subscriber goal${adminCommandLines(user)}  
-/help — show help menu  
-/unsubscribe &lt;channel_id&gt; — stop tracking  
+/rejoiners [channel_id] — view repeat & re-joining members  
+/backfill &lt;@user|id&gt; &lt;channel_id&gt; &lt;YYYY-MM-DD&gt; — backfill join date  
+/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber milestone goal  
+/goalstatus [channel_id] — view visual progress bar  
+/goaloff [channel_id] — clear subscriber goal${adminCommandLines(user)}  
+/notify &lt;channel_id&gt; all|joins|leaves — choose alert types  
+/hideuser &lt;channel_id&gt; on|off — toggle username privacy  
+/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid notifications  
+/unsubscribe &lt;channel_id&gt; — stop tracking channel  
+/help — show documentation & guide  
 
 ━━━━━━━━━━━━━━
-⚡ <i>Once added, tracking starts automatically.</i>`
+⚡ <i>Tip: Send /channels to open the 1-tap control dashboard.</i>`
     );
   }
 
@@ -81,45 +86,38 @@ async function handleCommand(msg, user) {
   if (msg === "/help") {
     return sendMessage(
       user.id,
-`📘 <b>Help Menu</b>
+`📘 <b>ChannelSubTracker Help & Features</b>
 
 ━━━━━━━━━━━━━━
-📊 <b>Features:</b>
-• Real-time join/leave tracking  
-• Automatic event logging  
-• Reliable retry system (no missed events)  
-• Choose all alerts, joins only, or leaves only  
-• Hide joiner/leaver usernames in notifications  
-• Batch rapid activity into summary notifications  
-• Set subscriber goals and celebrate milestones  
+🎛 <b>Interactive Dashboard & Toggles:</b>
+Send /channels or /settings to open the control panel. You can toggle:
+• 🔔 <b>Alerts Mode:</b> Cycle through All Activity ➔ Joins Only ➔ Leaves Only ➔ Muted
+• 👤 <b>Username Privacy:</b> Toggle between Visible 👁 and Hidden 🙈
+• ⏱ <b>Notification Batching:</b> Cycle between Instant ⚡, 30s, 1m, and 5m summary batches
+• 🎯 <b>Milestone Goals:</b> Monitor live progress with visual Unicode progress bars
 
 ━━━━━━━━━━━━━━
-⚙️ <b>How to Use:</b>
-
-1. Add bot as admin in your channel  
-2. Enable <b>"View Members"</b>  
-3. Use /channels to verify  
-
-━━━━━━━━━━━━━━
-📌 <b>Commands:</b>
-
-/start — setup instructions  
-/channels — list your channels  
-/history &lt;@user|id&gt; [channel_id] — view subscriber lifecycle dossier  
-/rejoiners [channel_id] — view repeat/re-joining subscribers  
-/settings &lt;channel_id&gt; — view notification settings  
-/notify &lt;channel_id&gt; all|joins|leaves — choose alerts  
-/hideuser &lt;channel_id&gt; on|off — hide or show usernames  
-/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid alerts  
-/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber goal  
-/goalstatus &lt;channel_id&gt; — view subscriber goal  
-/goaloff &lt;channel_id&gt; — clear subscriber goal${adminCommandLines(user)}  
-/unsubscribe &lt;channel_id&gt; — stop tracking  
-/help — show this menu  
+👥 <b>Subscriber Auditing & Dossiers:</b>
+• <b>Quick Action Buttons:</b> Every join/leave notification includes a <code>[ 👤 Member Dossier ]</code> button to instantly check a user's history with one tap.
+• <b>Lifespan & Stints:</b> Use <code>/history @username</code> or <code>/history user_id</code> to view join/leave history, active stint duration, and total lifetime in your channel.
+• <b>Re-joiners Report:</b> Use <code>/rejoiners</code> to see which members have left and returned.
+• <b>Backfilling:</b> If a member joined before the bot was added, record their join date with <code>/backfill @username channel_id YYYY-MM-DD</code>.
 
 ━━━━━━━━━━━━━━
-🧠 <i>Tip:</i>  
-Use the channel ID from /channels when unsubscribing.`
+📌 <b>All Commands:</b>
+/channels — open channel control dashboard  
+/settings [channel_id] — view/edit notification settings  
+/history &lt;@user|id&gt; [channel_id] — member lifecycle dossier  
+/rejoiners [channel_id] — repeat & returning subscriber report  
+/backfill &lt;@user|id&gt; &lt;channel_id&gt; &lt;YYYY-MM-DD&gt; — backfill join date  
+/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber milestone goal  
+/goalstatus [channel_id] — view progress bar towards goal  
+/goaloff [channel_id] — clear active subscriber goal${adminCommandLines(user)}  
+/notify &lt;channel_id&gt; all|joins|leaves — choose alert mode  
+/hideuser &lt;channel_id&gt; on|off — hide/show usernames  
+/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid notifications  
+/unsubscribe &lt;channel_id&gt; — stop tracking channel  
+/start — overview and onboarding`
     );
   }
 
@@ -297,85 +295,99 @@ Use the channel ID from /channels when unsubscribing.`
   }
 
   // ----------------------
-  // CHANNELS LIST
+  // CHANNELS LIST & DASHBOARD
   // ----------------------
   if (msg === "/channels") {
     const { data } = await supabase
       .from("channel_admins")
       .select(
-        "channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)"
+        "channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(id, title, username)"
       )
       .eq("user_id", user.id);
 
     if (!data?.length) {
-      return sendMessage(user.id, "📭 No channels connected.");
+      return sendMessage(
+        user.id,
+        "📭 No channels connected.\n\nAdd this bot as an ADMIN to your channel with 'View Members' permission to begin tracking."
+      );
     }
 
-    let out = "📺 <b>Your Channels</b>\n\n";
+    if (data.length === 1) {
+      const channelId = data[0].channel_id;
+      const { data: activeGoal } = await supabase
+        .from("subscriber_goals")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("channel_id", channelId)
+        .eq("active", true)
+        .maybeSingle();
 
-    for (const c of data) {
-      const ch = c.channels;
-
-      const display = ch?.username
-        ? `<a href="https://t.me/${ch.username}">${escapeHtml(ch.title)}</a>`
-        : `<b>${escapeHtml(ch?.title || "Unknown")}</b>`;
-
-      const settings = adminSettings(c);
-      const usernameMode = settings.hide_usernames ? "hidden" : "visible";
-
-      out += `• ${display}\n<code>${c.channel_id}</code>\nAlerts: ${notificationMode(settings)}\nUsernames: ${usernameMode}\nBatching: ${batchMode(settings)}\n\n`;
+      const view = buildDashboardView(data[0], activeGoal);
+      return sendMessage(user.id, view.text, { reply_markup: view.reply_markup });
     }
 
-    return sendMessage(user.id, out);
+    const view = buildChannelsListView(data);
+    return sendMessage(user.id, view.text, { reply_markup: view.reply_markup });
   }
 
   // ----------------------
-  // SETTINGS
+  // SETTINGS & DASHBOARD
   // ----------------------
   if (msg.startsWith("/settings")) {
     const channelId = msg.split(/\s+/)[1];
 
     if (!channelId) {
-      return sendMessage(user.id, "❌ Usage: /settings &lt;channel_id&gt;");
+      const { data: userChannels } = await supabase
+        .from("channel_admins")
+        .select(
+          "channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(id, title, username)"
+        )
+        .eq("user_id", user.id);
+
+      if (!userChannels?.length) {
+        return sendMessage(user.id, "📭 No channels connected.");
+      }
+
+      if (userChannels.length === 1) {
+        const { data: activeGoal } = await supabase
+          .from("subscriber_goals")
+          .select("*")
+          .eq("user_id", user.id)
+          .eq("channel_id", userChannels[0].channel_id)
+          .eq("active", true)
+          .maybeSingle();
+
+        const view = buildDashboardView(userChannels[0], activeGoal);
+        return sendMessage(user.id, view.text, { reply_markup: view.reply_markup });
+      }
+
+      const view = buildChannelsListView(userChannels);
+      return sendMessage(user.id, view.text, { reply_markup: view.reply_markup });
     }
 
     const { data: row, error: settingsError } = await supabase
       .from("channel_admins")
       .select(
-        "channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(title, username)"
+        "channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(id, title, username)"
       )
       .eq("user_id", user.id)
       .eq("channel_id", channelId)
-      .single();
+      .maybeSingle();
 
     if (settingsError || !row) {
       return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
     }
 
-    const settings = adminSettings(row);
-    return sendMessage(
-      user.id,
-`⚙️ <b>Notification Settings</b>
+    const { data: activeGoal } = await supabase
+      .from("subscriber_goals")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("channel_id", channelId)
+      .eq("active", true)
+      .maybeSingle();
 
-📢 ${channelDisplay(row.channels)}
-🆔 Channel ID: <code>${row.channel_id}</code>
-
-Alerts: <b>${notificationMode(settings)}</b>
-Usernames: <b>${settings.hide_usernames ? "hidden" : "visible"}</b>
-Batching: <b>${batchMode(settings)}</b>
-
-Commands:
-/notify ${row.channel_id} all
-/notify ${row.channel_id} joins
-/notify ${row.channel_id} leaves
-/hideuser ${row.channel_id} on
-/hideuser ${row.channel_id} off
-/batch ${row.channel_id} off
-/batch ${row.channel_id} 1m
-/goal ${row.channel_id} 1000
-/goalstatus ${row.channel_id}
-/goaloff ${row.channel_id}`
-    );
+    const view = buildDashboardView(row, activeGoal);
+    return sendMessage(user.id, view.text, { reply_markup: view.reply_markup });
   }
 
   // ----------------------
@@ -492,10 +504,23 @@ Commands:
   // GOAL STATUS
   // ----------------------
   if (msg.startsWith("/goalstatus")) {
-    const channelId = msg.split(/\s+/)[1];
+    let channelId = msg.split(/\s+/)[1];
 
     if (!channelId) {
-      return sendMessage(user.id, "❌ Usage: /goalstatus &lt;channel_id&gt;");
+      const { data: userChannels } = await supabase
+        .from("channel_admins")
+        .select("channel_id")
+        .eq("user_id", user.id);
+
+      if (!userChannels?.length) {
+        return sendMessage(user.id, "📭 No channels connected.");
+      }
+
+      if (userChannels.length === 1) {
+        channelId = userChannels[0].channel_id;
+      } else {
+        return sendMessage(user.id, "❌ Usage: /goalstatus &lt;channel_id&gt;");
+      }
     }
 
     const { data: goal, error: goalError } = await supabase
@@ -511,28 +536,33 @@ Commands:
       return sendMessage(user.id, "❌ Could not load subscriber goal.");
     }
 
-    if (!goal) {
-      return sendMessage(user.id, "📭 No active subscriber goal for that channel.");
-    }
+    const { data: ch } = await supabase
+      .from("channels")
+      .select("id, title, username")
+      .eq("id", channelId)
+      .maybeSingle();
 
-    return sendMessage(
-      user.id,
-      goalMessage(
-        goal,
-        { title: goal.channel_title, username: goal.channel_username },
-        goal.last_count
-      )
-    );
+    const view = buildGoalDetailView(goal, ch || { title: "Channel" }, channelId);
+    return sendMessage(user.id, view.text, { reply_markup: view.reply_markup });
   }
 
   // ----------------------
   // GOAL OFF
   // ----------------------
   if (msg.startsWith("/goaloff")) {
-    const channelId = msg.split(/\s+/)[1];
+    let channelId = msg.split(/\s+/)[1];
 
     if (!channelId) {
-      return sendMessage(user.id, "❌ Usage: /goaloff &lt;channel_id&gt;");
+      const { data: userChannels } = await supabase
+        .from("channel_admins")
+        .select("channel_id")
+        .eq("user_id", user.id);
+
+      if (userChannels?.length === 1) {
+        channelId = userChannels[0].channel_id;
+      } else {
+        return sendMessage(user.id, "❌ Usage: /goaloff &lt;channel_id&gt;");
+      }
     }
 
     const { error: clearError } = await supabase
@@ -550,7 +580,13 @@ Commands:
       return sendMessage(user.id, "❌ Could not clear subscriber goal.");
     }
 
-    return sendMessage(user.id, "✅ Subscriber goal cleared.");
+    return sendMessage(user.id, "✅ Subscriber goal cleared.", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔙 Channel Dashboard", callback_data: `cb:ch_view:${channelId}` }],
+        ],
+      },
+    });
   }
 
   // ----------------------
