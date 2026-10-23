@@ -10,3 +10,13 @@ CREATE INDEX IF NOT EXISTS event_queue_pending_idx
 -- Without this, every join/leave event scans the full channel_admins table.
 CREATE INDEX IF NOT EXISTS channel_admins_channel_idx
   ON public.channel_admins (channel_id);
+
+-- Subscriber history lookups and prior join checks:
+-- SELECT ... WHERE channel_id = ? AND user_id = ?
+CREATE INDEX IF NOT EXISTS events_channel_user_idx
+  ON public.events (channel_id, user_id, created_at);
+
+-- Subscriber search by username:
+-- SELECT ... WHERE channel_id = ? AND username ILIKE ?
+CREATE INDEX IF NOT EXISTS events_channel_username_idx
+  ON public.events (channel_id, username);
