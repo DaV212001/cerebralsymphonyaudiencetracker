@@ -163,7 +163,54 @@ function buildRejoinersReport(channel, events) {
 ${topList}`;
 }
 
+function buildPreExistingMemberReport(
+  userTarget,
+  channel,
+  liveMember,
+  otherChannelEvents = []
+) {
+  const u = liveMember.user || {};
+  const displayName = u.username
+    ? `@${escapeHtml(u.username)}`
+    : escapeHtml(u.first_name || userTarget);
+  const fullName = [u.first_name, u.last_name].filter(Boolean).join(" ");
+  const nameLine = fullName ? ` (${escapeHtml(fullName)})` : "";
+
+  let otherChannelsSection = "";
+  if (otherChannelEvents.length > 0) {
+    const list = otherChannelEvents
+      .map((e) => {
+        const dateStr = new Date(e.created_at).toLocaleDateString(undefined, {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        });
+        const chName = e.channels?.title || `Channel ${e.channel_id}`;
+        return `• ${escapeHtml(chName)}: Joined on ${dateStr}`;
+      })
+      .join("\n");
+    otherChannelsSection = `\n\n🌐 <b>Activity in Your Other Channels:</b>\n${list}`;
+  }
+
+  const role =
+    liveMember.status === "creator"
+      ? "👑 Channel Owner"
+      : liveMember.status === "administrator"
+      ? "⭐ Administrator"
+      : "🟢 Active Member";
+
+  return `👤 <b>Subscriber Dossier: ${displayName}${nameLine}</b>
+🆔 User ID: <code>${u.id}</code>
+📢 ${channelDisplay(channel)}
+━━━━━━━━━━━━━━
+📊 <b>Current Status:</b> ${role} <i>(Verified via live Telegram)</i>
+
+ℹ️ <b>Founding / Pre-Existing Subscriber</b>
+This member is currently present in your channel, but joined before the bot began tracking events (or has never unsubscribed). As a result, no join/leave churn transitions exist in the database.${otherChannelsSection}`;
+}
+
 module.exports = {
   buildSubscriberHistoryReport,
   buildRejoinersReport,
+  buildPreExistingMemberReport,
 };

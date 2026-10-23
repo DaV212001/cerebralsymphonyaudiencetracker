@@ -140,10 +140,23 @@ async function getChannelMemberCount(channelId) {
   return Number(response.data?.result || 0);
 }
 
+async function getChatMember(channelId, userId) {
+  try {
+    const response = await axios.post(`${TELEGRAM_API}/getChatMember`, {
+      chat_id: channelId,
+      user_id: userId,
+    });
+    return response.data?.result || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 module.exports = {
   sendMessage,
   sendTrackedMessage,
   editTrackedMessage,
   sendAnimation,
   getChannelMemberCount,
+  getChatMember,
 };

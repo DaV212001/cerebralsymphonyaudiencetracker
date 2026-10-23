@@ -4,12 +4,14 @@ const {
   sendTrackedMessage,
   editTrackedMessage,
   getChannelMemberCount,
+  getChatMember,
 } = require("../services/telegram");
 const { invalidateChannelAdminsCache } = require("../services/cache");
 const { goalMessage } = require("../services/goals");
 const {
   buildSubscriberHistoryReport,
   buildRejoinersReport,
+  buildPreExistingMemberReport,
 } = require("../reports/subscriberHistory");
 const {
   escapeHtml,
@@ -791,13 +793,38 @@ Commands:
         );
         await sendMessage(user.id, report);
         reportsSent += 1;
+      } else if (resolvedUserId) {
+        // Fallback: check live Telegram status for founding/pre-existing members who never left
+        const liveMember = await getChatMember(ch.channel_id, resolvedUserId);
+        if (
+          liveMember &&
+          ["member", "administrator", "creator"].includes(liveMember.status)
+        ) {
+          const { data: otherEvents } = await supabase
+            .from("events")
+            .select("channel_id, created_at, channels(title)")
+            .eq("user_id", resolvedUserId)
+            .neq("channel_id", ch.channel_id)
+            .eq("event_type", "JOIN");
+
+          const report = buildPreExistingMemberReport(
+            target,
+            ch.channels || { title: "Channel" },
+            liveMember,
+            otherEvents || []
+          );
+          await sendMessage(user.id, report);
+          reportsSent += 1;
+        }
       }
     }
 
     if (reportsSent === 0) {
       return sendMessage(
         user.id,
-        `📭 No recorded history found for <b>${escapeHtml(target)}</b> in your channel(s).`
+        `📭 No recorded join/leave history found for <b>${escapeHtml(
+          target
+        )}</b> in your channel(s).\n\n<i>Note: Telegram only sends events when members join or leave while the bot is active. Members who joined before tracking began and have never left have no churn events recorded.</i>`
       );
     }
 
