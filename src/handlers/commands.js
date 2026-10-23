@@ -886,6 +886,88 @@ Commands:
     );
     return sendMessage(user.id, report);
   }
+
+  // ----------------------
+  // BACKFILL
+  // ----------------------
+  if (msg.startsWith("/backfill")) {
+    const parts = msg.trim().split(/\s+/);
+    const target = parts[1];
+    const channelId = parts[2];
+    const dateStr = parts[3];
+    const timeStr = parts[4] || "00:00";
+
+    if (!target || !channelId || !dateStr) {
+      return sendMessage(
+        user.id,
+        "❌ Usage: /backfill &lt;@username | user_id&gt; &lt;channel_id&gt; &lt;YYYY-MM-DD&gt; [HH:mm]\n\nExample:\n<code>/backfill @username -1002075016349 2026-04-20 23:59</code>"
+      );
+    }
+
+    const isSuperadmin = ADMIN_USER_ID && user.id === ADMIN_USER_ID;
+
+    const { data: adminRow } = await supabase
+      .from("channel_admins")
+      .select("channel_id, channels(title, username)")
+      .eq("user_id", user.id)
+      .eq("channel_id", channelId)
+      .maybeSingle();
+
+    if (!adminRow && !isSuperadmin) {
+      return sendMessage(user.id, "❌ Channel not found in your subscriptions.");
+    }
+
+    const parsedDate = new Date(`${dateStr}T${timeStr}:00Z`);
+    if (isNaN(parsedDate.getTime())) {
+      return sendMessage(
+        user.id,
+        "❌ Invalid date format. Please use YYYY-MM-DD (e.g. 2026-04-20)."
+      );
+    }
+
+    const clean = target.replace(/^@/, "").trim();
+    const isNumeric = /^-?\d+$/.test(clean) && !target.startsWith("@");
+
+    let resolvedUserId = isNumeric ? Number(clean) : null;
+    let resolvedUsername = !isNumeric ? clean : null;
+
+    if (!resolvedUserId) {
+      const { data: matchedEvents } = await supabase
+        .from("events")
+        .select("user_id, username")
+        .or(`username.ilike.${clean},username.ilike.@${clean}`)
+        .not("user_id", "is", null)
+        .limit(1);
+
+      if (matchedEvents?.length) {
+        resolvedUserId = matchedEvents[0].user_id;
+      }
+    }
+
+    const isoTime = parsedDate.toISOString();
+
+    const { error: insertError } = await supabase.from("events").insert({
+      channel_id: channelId,
+      user_id: resolvedUserId || null,
+      username: resolvedUsername || clean,
+      event_type: "JOIN",
+      event_time: isoTime,
+      created_at: isoTime,
+    });
+
+    if (insertError) {
+      err("backfill insert failed:", insertError.message);
+      return sendMessage(user.id, "❌ Could not save backfill record.");
+    }
+
+    const displayName = resolvedUsername
+      ? `@${escapeHtml(resolvedUsername)}`
+      : target;
+    return sendMessage(
+      user.id,
+      `✅ <b>Backfilled Join Event!</b>\n\n👤 ${displayName}\n📅 Date: ${parsedDate.toUTCString()}\n📢 Channel ID: <code>${channelId}</code>\n\nRun <code>/history ${target} ${channelId}</code> to view their updated dossier!`
+    );
+  }
 }
 
 module.exports = {
