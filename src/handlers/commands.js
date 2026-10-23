@@ -81,43 +81,72 @@ async function handleCommand(msg, user) {
   }
 
   // ----------------------
-  // HELP
+  // HELP (Documentation & Setup Guide)
   // ----------------------
   if (msg === "/help") {
     return sendMessage(
       user.id,
-`📘 <b>ChannelSubTracker Help & Features</b>
+`📖 <b>ChannelSubTracker — Documentation & Setup Guide</b>
 
 ━━━━━━━━━━━━━━
-🎛 <b>Interactive Dashboard & Toggles:</b>
-Send /channels or /settings to open the control panel. You can toggle:
-• 🔔 <b>Alerts Mode:</b> Cycle through All Activity ➔ Joins Only ➔ Leaves Only ➔ Muted
-• 👤 <b>Username Privacy:</b> Toggle between Visible 👁 and Hidden 🙈
-• ⏱ <b>Notification Batching:</b> Cycle between Instant ⚡, 30s, 1m, and 5m summary batches
-• 🎯 <b>Milestone Goals:</b> Monitor live progress with visual Unicode progress bars
+🛠 <b>Step-by-Step Setup Guide:</b>
+
+1️⃣ <b>Add Bot as Channel Admin:</b>
+• Open your Telegram Channel settings ➔ <b>Administrators</b> ➔ <b>Add Administrator</b>.
+• Search for <code>@channelsubcribertrackerbot</code> and add it.
+
+2️⃣ <b>Grant Permissions:</b>
+• Enable <b>"View Members"</b> (or "Invite Users via Link").
+• <i>(Telegram requires this permission so it can dispatch join & leave events to the bot.)</i>
+
+3️⃣ <b>Confirm Connection:</b>
+• Return to this chat and send <b>/channels</b>.
+• You will immediately see your channel with its interactive <b>Control Dashboard</b>.
+
+━━━━━━━━━━━━━━
+🎛 <b>Configuring Your Notifications:</b>
+
+Send <b>/channels</b> or <b>/settings</b> to open the 1-tap dashboard:
+• 🔔 <b>Alerts Mode:</b> Cycle between <code>All Activity</code> ➔ <code>Joins Only</code> ➔ <code>Leaves Only</code> ➔ <code>Muted</code>.
+• 👤 <b>Username Privacy:</b> Toggle between <code>Visible 👁</code> and <code>Hidden 🙈</code> (anonymizes user names in alerts).
+• ⏱ <b>Batching Window:</b> Cycle between <code>Instant ⚡</code>, <code>30s</code>, <code>1m</code>, and <code>5m</code> (groups rapid activity into a single summary).
 
 ━━━━━━━━━━━━━━
 👥 <b>Subscriber Auditing & Dossiers:</b>
-• <b>Quick Action Buttons:</b> Every join/leave notification includes a <code>[ 👤 Member Dossier ]</code> button to instantly check a user's history with one tap.
-• <b>Lifespan & Stints:</b> Use <code>/history @username</code> or <code>/history user_id</code> to view join/leave history, active stint duration, and total lifetime in your channel.
-• <b>Re-joiners Report:</b> Use <code>/rejoiners</code> to see which members have left and returned.
-• <b>Backfilling:</b> If a member joined before the bot was added, record their join date with <code>/backfill @username channel_id YYYY-MM-DD</code>.
+
+• <b>One-Tap Dossier:</b> Whenever a join or leave alert arrives, tap <b>[ 👤 Member Dossier ]</b> to see their tenure, join date, and return history.
+• <b>Manual Audit:</b>
+  <code>/history @username</code> — view lifecycle history across your channels.
+  <code>/history 123456789 -1002075016349</code> — audit by numeric User ID.
+• <b>Repeat Joiners:</b>
+  <code>/rejoiners [channel_id]</code> — see members who have left and returned.
+• <b>Backfill Founding Members:</b>
+  If a member joined before the bot was added:
+  <code>/backfill @username &lt;channel_id&gt; YYYY-MM-DD [HH:mm]</code>
 
 ━━━━━━━━━━━━━━
-📌 <b>All Commands:</b>
-/channels — open channel control dashboard  
-/settings [channel_id] — view/edit notification settings  
-/history &lt;@user|id&gt; [channel_id] — member lifecycle dossier  
-/rejoiners [channel_id] — repeat & returning subscriber report  
-/backfill &lt;@user|id&gt; &lt;channel_id&gt; &lt;YYYY-MM-DD&gt; — backfill join date  
-/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber milestone goal  
-/goalstatus [channel_id] — view progress bar towards goal  
-/goaloff [channel_id] — clear active subscriber goal${adminCommandLines(user)}  
-/notify &lt;channel_id&gt; all|joins|leaves — choose alert mode  
-/hideuser &lt;channel_id&gt; on|off — hide/show usernames  
-/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid notifications  
-/unsubscribe &lt;channel_id&gt; — stop tracking channel  
-/start — overview and onboarding`
+🎯 <b>Subscriber Milestone Goals:</b>
+
+• <b>Set a Goal:</b> <code>/goal &lt;channel_id&gt; &lt;target&gt;</code> (e.g. <code>/goal -1002075016349 1000</code>).
+• <b>View Visual Progress:</b> Send <code>/goalstatus</code> to view the live Unicode progress bar <code>[████████░░░░] 74.2%</code>.
+• <b>Clear Goal:</b> Send <code>/goaloff</code>.
+
+━━━━━━━━━━━━━━
+📌 <b>Command Reference:</b>
+/channels — interactive channel control dashboard
+/settings [channel_id] — view/edit channel alert settings
+/history &lt;@user|id&gt; [channel_id] — member lifecycle dossier
+/rejoiners [channel_id] — repeat & returning subscriber report
+/backfill &lt;@user|id&gt; &lt;channel_id&gt; &lt;YYYY-MM-DD&gt; — backfill join date
+/goal &lt;channel_id&gt; &lt;target_count&gt; — set subscriber milestone goal
+/goalstatus [channel_id] — view live goal progress bar
+/goaloff [channel_id] — clear active subscriber goal${adminCommandLines(user)}
+/notify &lt;channel_id&gt; all|joins|leaves — set alerts mode via command
+/hideuser &lt;channel_id&gt; on|off — toggle username privacy via command
+/batch &lt;channel_id&gt; off|30s|1m|5m — batch rapid notifications via command
+/unsubscribe &lt;channel_id&gt; — disconnect bot from tracking a channel
+/start — welcome message & quick links
+/help — show this documentation & setup guide`
     );
   }
 
