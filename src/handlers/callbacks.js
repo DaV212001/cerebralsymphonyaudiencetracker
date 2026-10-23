@@ -63,13 +63,76 @@ async function handleCallbackQuery(query) {
       }
 
       const view = buildChannelsListView(list);
-      return editMessageText(chatId, messageId, view.text, {
+      const editRes = await editMessageText(chatId, messageId, view.text, {
+        reply_markup: view.reply_markup,
+      });
+
+      if (!editRes?.ok) {
+        return sendMessage(chatId, view.text, { reply_markup: view.reply_markup });
+      }
+      return;
+    }
+
+    // ----------------------------------------------------
+    // 2. OPEN FRESH DASHBOARD (cb:ch_dash:<id>)
+    // Used by notification buttons to send dashboard as a new message
+    // ----------------------------------------------------
+    if (data.startsWith("cb:ch_dash:")) {
+      const channelId = data.slice("cb:ch_dash:".length);
+      await answerCallbackQuery(query.id);
+
+      let { data: adminRow } = await supabase
+        .from("channel_admins")
+        .select(
+          "channel_id, notify_joins, notify_leaves, hide_usernames, batch_window_seconds, channels(id, title, username)"
+        )
+        .eq("user_id", userId)
+        .eq("channel_id", channelId)
+        .maybeSingle();
+
+      if (!adminRow && isSuperadmin) {
+        const { data: ch } = await supabase
+          .from("channels")
+          .select("id, title, username")
+          .eq("id", channelId)
+          .maybeSingle();
+
+        if (ch) {
+          adminRow = {
+            channel_id: ch.id,
+            notify_joins: true,
+            notify_leaves: true,
+            hide_usernames: false,
+            batch_window_seconds: 0,
+            channels: ch,
+          };
+        }
+      }
+
+      if (!adminRow) {
+        return answerCallbackQuery(
+          query.id,
+          "❌ Channel not found in your subscriptions.",
+          true
+        );
+      }
+
+      const { data: activeGoal } = await supabase
+        .from("subscriber_goals")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("channel_id", channelId)
+        .eq("active", true)
+        .maybeSingle();
+
+      const view = buildDashboardView(adminRow, activeGoal);
+      return sendMessage(chatId, view.text, {
         reply_markup: view.reply_markup,
       });
     }
 
     // ----------------------------------------------------
-    // 2. CHANNEL DASHBOARD VIEW & REFRESH (cb:ch_view:<id>, cb:refresh:<id>)
+    // 3. CHANNEL DASHBOARD VIEW & REFRESH (cb:ch_view:<id>, cb:refresh:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:ch_view:") || data.startsWith("cb:refresh:")) {
       const isRefresh = data.startsWith("cb:refresh:");
@@ -127,13 +190,18 @@ async function handleCallbackQuery(query) {
       );
 
       const view = buildDashboardView(adminRow, activeGoal);
-      return editMessageText(chatId, messageId, view.text, {
+      const editRes = await editMessageText(chatId, messageId, view.text, {
         reply_markup: view.reply_markup,
       });
+
+      if (!editRes?.ok) {
+        return sendMessage(chatId, view.text, { reply_markup: view.reply_markup });
+      }
+      return;
     }
 
     // ----------------------------------------------------
-    // 3. TOGGLE NOTIFICATIONS (cb:t_notif:<id>)
+    // 4. TOGGLE NOTIFICATIONS (cb:t_notif:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:t_notif:")) {
       const channelId = data.slice("cb:t_notif:".length);
@@ -205,7 +273,7 @@ async function handleCallbackQuery(query) {
     }
 
     // ----------------------------------------------------
-    // 4. TOGGLE USERNAME PRIVACY (cb:t_user:<id>)
+    // 5. TOGGLE USERNAME PRIVACY (cb:t_user:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:t_user:")) {
       const channelId = data.slice("cb:t_user:".length);
@@ -254,7 +322,7 @@ async function handleCallbackQuery(query) {
     }
 
     // ----------------------------------------------------
-    // 5. TOGGLE BATCHING WINDOW (cb:t_batch:<id>)
+    // 6. TOGGLE BATCHING WINDOW (cb:t_batch:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:t_batch:")) {
       const channelId = data.slice("cb:t_batch:".length);
@@ -317,7 +385,7 @@ async function handleCallbackQuery(query) {
     }
 
     // ----------------------------------------------------
-    // 6. VIEW GOAL DETAILS (cb:goal_view:<id>)
+    // 7. VIEW GOAL DETAILS (cb:goal_view:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:goal_view:")) {
       const channelId = data.slice("cb:goal_view:".length);
@@ -344,7 +412,7 @@ async function handleCallbackQuery(query) {
     }
 
     // ----------------------------------------------------
-    // 7. CLEAR GOAL (cb:goal_clear:<id>)
+    // 8. CLEAR GOAL (cb:goal_clear:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:goal_clear:")) {
       const channelId = data.slice("cb:goal_clear:".length);
@@ -374,7 +442,7 @@ async function handleCallbackQuery(query) {
     }
 
     // ----------------------------------------------------
-    // 8. VIEW REJOINERS (cb:rejoin_view:<id>)
+    // 9. VIEW REJOINERS (cb:rejoin_view:<id>)
     // ----------------------------------------------------
     if (data.startsWith("cb:rejoin_view:")) {
       const channelId = data.slice("cb:rejoin_view:".length);
@@ -408,7 +476,7 @@ async function handleCallbackQuery(query) {
     }
 
     // ----------------------------------------------------
-    // 9. MEMBER DOSSIER FROM NOTIFICATION (cb:dossier:<channelId>:<userId>)
+    // 10. MEMBER DOSSIER FROM NOTIFICATION (cb:dossier:<channelId>:<userId>)
     // ----------------------------------------------------
     if (data.startsWith("cb:dossier:")) {
       const parts = data.split(":");
@@ -423,12 +491,26 @@ async function handleCallbackQuery(query) {
         .eq("id", channelId)
         .maybeSingle();
 
-      const { data: events } = await supabase
+      const cleanUserId = /^\d+$/.test(targetUserId) ? Number(targetUserId) : null;
+      let queryEvents = supabase
         .from("events")
         .select("*")
-        .eq("channel_id", channelId)
-        .eq("user_id", targetUserId)
-        .order("created_at", { ascending: true });
+        .eq("channel_id", channelId);
+
+      if (cleanUserId) {
+        queryEvents = queryEvents.or(
+          `user_id.eq.${cleanUserId},username.ilike.${targetUserId}`
+        );
+      } else {
+        const clean = targetUserId.replace(/^@/, "");
+        queryEvents = queryEvents.or(
+          `username.ilike.${clean},username.ilike.@${clean}`
+        );
+      }
+
+      const { data: events } = await queryEvents.order("created_at", {
+        ascending: true,
+      });
 
       let report;
       if (events?.length) {
@@ -438,7 +520,9 @@ async function handleCallbackQuery(query) {
           events
         );
       } else {
-        const liveMember = await getChatMember(channelId, targetUserId);
+        const liveMember = cleanUserId
+          ? await getChatMember(channelId, cleanUserId)
+          : null;
         report = buildPreExistingMemberReport(
           targetUserId,
           ch || { title: "Channel" },
@@ -453,7 +537,7 @@ async function handleCallbackQuery(query) {
             [
               {
                 text: "⚙️ Channel Dashboard",
-                callback_data: `cb:ch_view:${channelId}`,
+                callback_data: `cb:ch_dash:${channelId}`,
               },
             ],
           ],

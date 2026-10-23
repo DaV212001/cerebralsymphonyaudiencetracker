@@ -22,7 +22,7 @@ const BOT_COMMANDS = [
 
 /**
  * Sends a message via Telegram Bot API with retry and HTML fallback.
- * Supports options (e.g. { reply_markup: { inline_keyboard: [...] } }).
+ * Automatically avoids retrying permanent client errors (e.g. chat not found, bot blocked).
  */
 async function sendMessage(chatId, text, options = {}, retry = 0) {
   let opts = options;
@@ -49,6 +49,8 @@ async function sendMessage(chatId, text, options = {}, retry = 0) {
     };
   } catch (e) {
     const desc = e.response?.data?.description || "";
+    const errorCode = e.response?.data?.error_code;
+    const status = e.response?.status;
 
     if (desc.includes("can't parse entities")) {
       const response = await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -63,13 +65,28 @@ async function sendMessage(chatId, text, options = {}, retry = 0) {
       };
     }
 
-    if (r < 4) {
-      await wait(1000 * 2 ** r);
+    // Permanent errors that should never be retried with exponential backoff
+    const isPermanent =
+      errorCode === 400 ||
+      errorCode === 403 ||
+      status === 400 ||
+      status === 403 ||
+      desc.includes("chat not found") ||
+      desc.includes("bot was blocked") ||
+      desc.includes("user is deactivated") ||
+      desc.includes("chat_id is empty") ||
+      desc.includes("have no rights to send a message");
+
+    if (!isPermanent && r < 4) {
+      const retryAfter = e.response?.data?.parameters?.retry_after;
+      const waitMs = retryAfter ? retryAfter * 1000 : 1000 * 2 ** r;
+      await wait(waitMs);
       return sendMessage(chatId, text, opts, r + 1);
     }
 
-    err("Telegram send failed:", e.response?.data || e.message);
-    return false;
+    const errorMsg = desc || e.message;
+    err("Telegram send failed:", errorMsg);
+    return { ok: false, error: errorMsg };
   }
 }
 
@@ -79,7 +96,10 @@ async function sendMessage(chatId, text, options = {}, retry = 0) {
 async function sendTrackedMessage(chatId, text, options = {}, retry = 0) {
   const result = await sendMessage(chatId, text, options, retry);
   if (!result || !result.ok) {
-    return { ok: false, error: "Telegram send failed" };
+    return {
+      ok: false,
+      error: (result && result.error) || "Telegram send failed",
+    };
   }
   return {
     ok: true,
@@ -112,6 +132,8 @@ async function editMessageText(chatId, messageId, text, options = {}, retry = 0)
     return { ok: true };
   } catch (e) {
     const desc = e.response?.data?.description || "";
+    const errorCode = e.response?.data?.error_code;
+    const status = e.response?.status;
 
     if (desc.includes("message is not modified")) {
       return { ok: true };
@@ -126,12 +148,24 @@ async function editMessageText(chatId, messageId, text, options = {}, retry = 0)
       return { ok: true };
     }
 
-    if (r < 4) {
-      await wait(1000 * 2 ** r);
+    const isPermanent =
+      errorCode === 400 ||
+      errorCode === 403 ||
+      status === 400 ||
+      status === 403 ||
+      desc.includes("message to edit not found") ||
+      desc.includes("chat not found") ||
+      desc.includes("bot was blocked") ||
+      desc.includes("message can't be edited");
+
+    if (!isPermanent && r < 4) {
+      const retryAfter = e.response?.data?.parameters?.retry_after;
+      const waitMs = retryAfter ? retryAfter * 1000 : 1000 * 2 ** r;
+      await wait(waitMs);
       return editMessageText(chatId, messageId, text, opts, r + 1);
     }
 
-    const error = e.response?.data?.description || e.message;
+    const error = desc || e.message;
     err("Telegram edit failed:", error);
     return { ok: false, error };
   }
@@ -223,6 +257,42 @@ async function setBotCommands(commands = BOT_COMMANDS) {
   }
 }
 
+/**
+ * Ensures Telegram webhook is set to production URL with all required update types,
+ * including callback_query for inline keyboard clicks.
+ */
+async function ensureWebhook() {
+  try {
+    const targetUrl = "https://channelsubscribertracker.onrender.com/webhook";
+    const res = await axios.get(`${TELEGRAM_API}/getWebhookInfo`);
+    const current = res.data?.result || {};
+    const allowed = current.allowed_updates || [];
+
+    if (
+      current.url !== targetUrl ||
+      !allowed.includes("callback_query") ||
+      !allowed.includes("message") ||
+      !allowed.includes("chat_member") ||
+      !allowed.includes("my_chat_member")
+    ) {
+      await axios.post(`${TELEGRAM_API}/setWebhook`, {
+        url: targetUrl,
+        allowed_updates: [
+          "message",
+          "my_chat_member",
+          "chat_member",
+          "callback_query",
+        ],
+      });
+      log("Telegram webhook verified and set with callback_query enabled");
+    }
+    return true;
+  } catch (e) {
+    err("ensureWebhook failed:", e.response?.data || e.message);
+    return false;
+  }
+}
+
 module.exports = {
   BOT_COMMANDS,
   sendMessage,
@@ -234,4 +304,5 @@ module.exports = {
   getChannelMemberCount,
   getChatMember,
   setBotCommands,
+  ensureWebhook,
 };

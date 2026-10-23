@@ -1,7 +1,7 @@
 const { PORT } = require("./src/config");
 const { app } = require("./src/app");
 const { startWorker } = require("./src/worker");
-const { setBotCommands } = require("./src/services/telegram");
+const { setBotCommands, ensureWebhook } = require("./src/services/telegram");
 const { log } = require("./src/utils/logger");
 
 app.listen(PORT, () => {
@@ -9,4 +9,5 @@ app.listen(PORT, () => {
   startWorker();
   log("⚙️ Event queue worker running");
   setBotCommands().catch(() => {});
+  ensureWebhook().catch(() => {});
 });

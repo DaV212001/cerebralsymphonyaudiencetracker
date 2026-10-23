@@ -198,7 +198,7 @@ async function handleChatMember(update) {
           }
           quickRow.push({
             text: "⚙️ Dashboard",
-            callback_data: `cb:ch_view:${channel.id}`,
+            callback_data: `cb:ch_dash:${channel.id}`,
           });
           buttons.push(quickRow);
 

@@ -169,7 +169,17 @@ function buildPreExistingMemberReport(
   liveMember,
   otherChannelEvents = []
 ) {
-  const u = liveMember.user || {};
+  if (!liveMember || !liveMember.user) {
+    return `👤 <b>Subscriber Dossier: ${escapeHtml(String(userTarget))}</b>
+📢 ${channelDisplay(channel)}
+━━━━━━━━━━━━━━
+ℹ️ <b>No Recorded History</b>
+
+This member has no recorded join/leave events in the database and is not currently detected as an active member in the channel.
+<i>(Telegram only dispatches events while the bot is an active admin.)</i>`;
+  }
+
+  const u = liveMember.user;
   const displayName = u.username
     ? `@${escapeHtml(u.username)}`
     : escapeHtml(u.first_name || userTarget);
