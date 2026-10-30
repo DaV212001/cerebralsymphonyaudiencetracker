@@ -263,7 +263,9 @@ async function setBotCommands(commands = BOT_COMMANDS) {
  */
 async function ensureWebhook() {
   try {
-    const targetUrl = "https://channelsubscribertracker.onrender.com/webhook";
+    const targetUrl = process.env.RENDER_EXTERNAL_URL
+      ? `${process.env.RENDER_EXTERNAL_URL}/webhook`
+      : "https://channelsubscribertracker-7lqm.onrender.com/webhook";
     const res = await axios.get(`${TELEGRAM_API}/getWebhookInfo`);
     const current = res.data?.result || {};
     const allowed = current.allowed_updates || [];
